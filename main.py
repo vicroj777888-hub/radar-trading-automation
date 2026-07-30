@@ -29,9 +29,7 @@ gc = gspread.authorize(creds)
 # ==========================================
 # CONFIGURACIÓN: ID DE TU GOOGLE SHEET
 # ==========================================
-# Reemplaza este ID con el ID de tu Google Sheet
-# (Lo encuentras en la URL de tu Sheet: https://docs.google.com/spreadsheets/d/ESTE_ID/edit)
-SPREADSHEET_ID = '/d/17cu_GUSQl5CWR1UXONrLPyaKD-0l0OdlwWMmg_e-G0U/edit'
+SPREADSHEET_ID = '17cu_GUSQl5CWR1UXONrLPyaKD-0l0OdlwWMmg_e-G0U'
 
 # ==========================================
 # LISTA DE ACTIVOS A ANALIZAR
