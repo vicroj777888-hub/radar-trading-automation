@@ -1,0 +1,64 @@
+{
+  "name": "Radar Francotirador - DSS Trading",
+  "dataColors": [
+    "#008000",
+    "#D32F2F",
+    "#FF9800",
+    "#1976D2",
+    "#7B1FA2",
+    "#00796B",
+    "#F57C00",
+    "#C2185B"
+  ],
+  "background": "#1A237E",
+  "foreground": "#FFFFFF",
+  "tableAccent": "#FFD700",
+  "good": "#008000",
+  "neutral": "#FF9800",
+  "bad": "#D32F2F",
+  "visualStyles": {
+    "*": {
+      "*": {
+        "background": [{"color": {"solid": {"color": "#FFFFFF"}}}],
+        "border": [{"color": {"solid": {"color": "#E0E0E0"}}}],
+        "fontFamily": [{"fontFamily": "Segoe UI"}],
+        "title": [{
+          "color": {"solid": {"color": "#333333"}},
+          "fontSize": 14,
+          "bold": true
+        }],
+        "categoryLabels": [{
+          "color": {"solid": {"color": "#555555"}},
+          "fontSize": 12
+        }],
+        "dataLabels": [{
+          "color": {"solid": {"color": "#000000"}},
+          "fontSize": 14,
+          "bold": true
+        }]
+      }
+    },
+    "card": {
+      "*": {
+        "background": [{"color": {"solid": {"color": "#FFFFFF"}}}],
+        "border": [{"show": true, "color": {"solid": {"color": "#E0E0E0"}}, "radius": 8}],
+        "categoryLabels": [{
+          "color": {"solid": {"color": "#333333"}},
+          "fontSize": 14,
+          "bold": true
+        }],
+        "callout": [{
+          "fontSize": 48,
+          "bold": true
+        }]
+      }
+    },
+    "tableEx": {
+      "*": {
+        "background": [{"color": {"solid": {"color": "#FFFFFF"}}}],
+        "grid": [{"color": {"solid": {"color": "#E0E0E0"}}}],
+        "textSize": 12
+      }
+    }
+  }
+}
