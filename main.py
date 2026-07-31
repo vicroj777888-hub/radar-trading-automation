@@ -40,7 +40,7 @@ tickers = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'NVDA', 'META', 'AMD', 'NFLX
 # PARÁMETROS DEL RADAR
 # ==========================================
 VOLUMEN_MINIMO = 1000
-DELTA_MINIMO = 0.10  # 10%
+DELTA_MINIMO = 0.10
 EXPIRACION_DIAS = 30
 
 # ==========================================
@@ -57,18 +57,15 @@ def analizar_activo(ticker):
         precio_actual = hist['Close'].iloc[-1]
         volumen = hist['Volume'].iloc[-1]
         
-        # Obtener opciones
         expiraciones = stock.options
         if not expiraciones:
             return None
         
-        # Tomar la primera expiración cercana
         expiracion = expiraciones[0]
         opciones = stock.option_chain(expiracion)
         calls = opciones.calls
         puts = opciones.puts
         
-        # Filtrar por volumen
         calls_viables = calls[calls['volume'] >= VOLUMEN_MINIMO]
         puts_viables = puts[puts['volume'] >= VOLUMEN_MINIMO]
         
@@ -94,22 +91,17 @@ def main():
         if resultado:
             resultados.append(resultado)
     
-    # Crear DataFrame
     df = pd.DataFrame(resultados)
     
-    # Guardar en Google Sheets
     try:
         sh = gc.open_by_key(SPREADSHEET_ID)
         worksheet = sh.sheet1
         
-        # Limpiar hoja
         worksheet.clear()
         
-        # Escribir headers
         headers = ['Ticker', 'Precio', 'Volumen', 'Calls Viables', 'Puts Viables', 'Expiración', 'Fecha Actualización']
         worksheet.append_row(headers)
         
-        # Escribir datos
         for _, row in df.iterrows():
             worksheet.append_row([
                 row['ticker'],
