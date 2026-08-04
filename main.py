@@ -51,4 +51,4 @@ def analizar_activo(ticker):
         stock = yf.Ticker(ticker)
         hist = stock.history(period="5d")
         
-        if hist.empty
+        if hist.empty:
