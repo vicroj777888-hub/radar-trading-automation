@@ -50,5 +50,74 @@ def analizar_activo(ticker):
     try:
         stock = yf.Ticker(ticker)
         hist = stock.history(period="5d")
-        
+
         if hist.empty:
+            return None
+
+        precio_actual = hist['Close'].iloc[-1]
+        volumen = hist['Volume'].iloc[-1]
+
+        expiraciones = stock.options
+        if not expiraciones:
+            return None
+
+        expiracion = expiraciones[0]
+        opciones = stock.option_chain(expiracion)
+        calls = opciones.calls
+        puts = opciones.puts
+
+        calls_viables = calls[calls['volume'] >= VOLUMEN_MINIMO]
+        puts_viables = puts[puts['volume'] >= VOLUMEN_MINIMO]
+
+        return {
+            'ticker': ticker,
+            'precio': precio_actual,
+            'volumen': volumen,
+            'calls_viables': len(calls_viables),
+            'puts_viables': len(puts_viables),
+            'expiracion': expiracion
+        }
+    except Exception as e:
+        print(f"Error analizando {ticker}: {e}")
+        return None
+
+def main():
+    print(f"Iniciando análisis - {datetime.now()}")
+
+    resultados = []
+    for ticker in tickers:
+        print(f"Analizando {ticker}...")
+        resultado = analizar_activo(ticker)
+        if resultado:
+            resultados.append(resultado)
+
+    df = pd.DataFrame(resultados)
+
+    try:
+        sh = gc.open_by_key(SPREADSHEET_ID)
+        worksheet = sh.sheet1
+
+        worksheet.clear()
+
+        headers = ['Ticker', 'Precio', 'Volumen', 'Calls Viables', 'Puts Viables', 'Expiración', 'Fecha Actualización']
+        worksheet.append_row(headers)
+
+        for _, row in df.iterrows():
+            worksheet.append_row([
+                row['ticker'],
+                row['precio'],
+                row['volumen'],
+                row['calls_viables'],
+                row['puts_viables'],
+                row['expiracion'],
+                datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            ])
+
+        print(f"✅ Datos actualizados en Google Sheets. Total: {len(df)} activos")
+    except Exception as e:
+        import traceback
+        print("❌ Error al escribir en Google Sheets:")
+        traceback.print_exc()
+
+if __name__ == '__main__':
+    main()
