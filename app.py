@@ -4,15 +4,31 @@ import yfinance as yf
 import plotly.graph_objects as go
 import json
 import urllib.request
+from datetime import datetime
+from zoneinfo import ZoneInfo
+from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(page_title="Radar DSS Trading", page_icon="🎯", layout="wide")
 
 SPREADSHEET_ID = '17cu_GUSQl5CWR1UXONrLPyaKD-0l0OdlwWMmg_e-G0U'
 URL_CSV = f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/export?format=csv&gid=0"
+ZONA_NY = ZoneInfo("America/New_York")
+
+if 'esperando' not in st.session_state:
+    st.session_state['esperando'] = False
+if 'aviso_listo' not in st.session_state:
+    st.session_state['aviso_listo'] = False
 
 @st.cache_data(ttl=300)
 def cargar_datos():
     return pd.read_csv(URL_CSV)
+
+def leer_fecha_sheet():
+    try:
+        df_tmp = pd.read_csv(URL_CSV, nrows=1)
+        return str(df_tmp['Fecha_Hora_Escaneo'].iloc[0])
+    except Exception:
+        return None
 
 @st.cache_data(ttl=900)
 def serie(ticker, intervalo, periodo):
@@ -159,6 +175,31 @@ except Exception as e:
 fecha = df['Fecha_Hora_Escaneo'].iloc[0] if not df.empty else "—"
 st.caption(f"🕒 Último escaneo (hora Nueva York): {fecha}")
 
+if st.session_state['aviso_listo']:
+    st.success("✅ ¡LISTO! El escaneo llegó: los datos ya están actualizados.")
+    st.session_state['aviso_listo'] = False
+
+if st.session_state['esperando']:
+    st_autorefresh(interval=30000, key="autorefresh_radar")
+    fecha_sheet = leer_fecha_sheet()
+    lanz = st.session_state.get('hora_lanzamiento')
+    listo = False
+    if fecha_sheet and lanz:
+        try:
+            listo = datetime.strptime(fecha_sheet, '%Y-%m-%d %H:%M:%S') > datetime.strptime(lanz, '%Y-%m-%d %H:%M:%S')
+        except Exception:
+            listo = False
+    if listo:
+        st.session_state['esperando'] = False
+        st.session_state['aviso_listo'] = True
+        cargar_datos.clear()
+        st.rerun()
+    else:
+        st.warning("⏳ Escaneo en curso… reviso el Sheet cada 30 segundos y te aviso aquí mismo cuando lleguen los datos nuevos.")
+        if st.button("Cancelar espera"):
+            st.session_state['esperando'] = False
+            st.rerun()
+
 calls_v = int(df['CALL Estado'].astype(str).str.contains('VIABLE', na=False).sum())
 puts_v = int(df['PUT Estado'].astype(str).str.contains('VIABLE', na=False).sum())
 latentes = int((df['Condicion 3: Zona Diario'] == 'En Piso Fuerte').sum())
@@ -206,7 +247,9 @@ if st.sidebar.button("🚀 Lanzar escaneo ahora"):
             method="POST",
         )
         urllib.request.urlopen(req)
-        st.sidebar.success("✅ ¡Escaneo lanzado! Los datos nuevos llegan en unos minutos.")
+        st.session_state['esperando'] = True
+        st.session_state['hora_lanzamiento'] = datetime.now(ZONA_NY).strftime('%Y-%m-%d %H:%M:%S')
+        st.sidebar.success("✅ ¡Escaneo lanzado! Te aviso cuando lleguen los datos.")
     except Exception as e:
         st.sidebar.error(f"❌ No se pudo lanzar el escaneo: {e}")
 
