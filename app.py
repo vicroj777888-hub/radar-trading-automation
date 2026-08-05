@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 import plotly.graph_objects as go
+import json
+import urllib.request
 
 st.set_page_config(page_title="Radar DSS Trading", page_icon="🎯", layout="wide")
 
@@ -155,7 +157,7 @@ except Exception as e:
     st.stop()
 
 fecha = df['Fecha_Hora_Escaneo'].iloc[0] if not df.empty else "—"
-st.caption(f"🕒 Último escaneo: {fecha}")
+st.caption(f"🕒 Último escaneo (hora Nueva York): {fecha}")
 
 calls_v = int(df['CALL Estado'].astype(str).str.contains('VIABLE', na=False).sum())
 puts_v = int(df['PUT Estado'].astype(str).str.contains('VIABLE', na=False).sum())
@@ -186,6 +188,31 @@ val_filt = st.sidebar.multiselect(
     options=sorted(df['Validación Humana'].unique().tolist()),
     default=sorted(df['Validación Humana'].unique().tolist())
 )
+
+st.sidebar.markdown("---")
+st.sidebar.header("🔄 Actualización manual")
+if st.sidebar.button("🚀 Lanzar escaneo ahora"):
+    try:
+        token = st.secrets["GH_TOKEN"]
+        url = "https://api.github.com/repos/vicroj777888-hub/radar-trading-automation/actions/workflows/actualizar_radar.yml/dispatches"
+        req = urllib.request.Request(
+            url,
+            data=json.dumps({"ref": "main"}).encode("utf-8"),
+            headers={
+                "Authorization": f"token {token}",
+                "Accept": "application/vnd.github+json",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        urllib.request.urlopen(req)
+        st.sidebar.success("✅ ¡Escaneo lanzado! Los datos nuevos llegan en unos minutos.")
+    except Exception as e:
+        st.sidebar.error(f"❌ No se pudo lanzar el escaneo: {e}")
+
+if st.sidebar.button("🔃 Recargar datos del Sheet"):
+    cargar_datos.clear()
+    st.rerun()
 
 df_f = df[
     df['Estrategia Cardona'].isin(estr_filt) &
