@@ -277,6 +277,7 @@ if st.sidebar.button("🚀 Lanzar escaneo ahora"):
         st.session_state['esperando'] = True
         st.session_state['hora_lanzamiento'] = datetime.now(ZONA_NY).strftime('%Y-%m-%d %H:%M:%S')
         st.sidebar.success("✅ ¡Escaneo lanzado! Te aviso cuando lleguen los datos.")
+        st.rerun()
     except Exception as e:
         st.sidebar.error(f"❌ No se pudo lanzar el escaneo: {e}")
 
