@@ -6,6 +6,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime
+from zoneinfo import ZoneInfo
 import gspread
 from google.oauth2.service_account import Credentials
 import json
@@ -29,6 +30,7 @@ gc = gspread.authorize(creds)
 # ==========================================
 SPREADSHEET_ID = '17cu_GUSQl5CWR1UXONrLPyaKD-0l0OdlwWMmg_e-G0U'
 NOMBRE_PESTANA = 'Radar_Senales'
+ZONA_NY = ZoneInfo("America/New_York")
 
 watchlist = [
     'SPY', 'QQQ', 'BAC', 'PFE', 'F', 'SOFI', 'CCL', 'AAL', 'SNAP', 'PLTR', 'HOOD', 'VALE', 'T',
@@ -45,9 +47,9 @@ rangos_cardona = {
 RANGO_DEFAULT = (0.10, 0.25)
 
 resultados = []
-fecha_escaneo = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+fecha_escaneo = datetime.now(ZONA_NY).strftime('%Y-%m-%d %H:%M:%S')
 
-print(f"🕒 Escaneo iniciado: {fecha_escaneo}")
+print(f"🕒 Escaneo iniciado (hora Nueva York): {fecha_escaneo}")
 print(f"📡 Descargando datos de {len(watchlist)} activos...")
 
 # ==========================================
