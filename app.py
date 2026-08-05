@@ -13,6 +13,7 @@ st.set_page_config(page_title="Radar DSS Trading", page_icon="🎯", layout="wid
 SPREADSHEET_ID = '17cu_GUSQl5CWR1UXONrLPyaKD-0l0OdlwWMmg_e-G0U'
 URL_CSV = f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/export?format=csv&gid=0"
 ZONA_NY = ZoneInfo("America/New_York")
+REPO = "vicroj777888-hub/radar-trading-automation"
 
 if 'esperando' not in st.session_state:
     st.session_state['esperando'] = False
@@ -29,6 +30,17 @@ def leer_fecha_sheet():
         return str(df_tmp['Fecha_Hora_Escaneo'].iloc[0])
     except Exception:
         return None
+
+def estado_robot():
+    try:
+        url = f"https://api.github.com/repos/{REPO}/actions/workflows/actualizar_radar.yml/runs?per_page=1"
+        req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json"})
+        with urllib.request.urlopen(req) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        run = data["workflow_runs"][0]
+        return run["status"], run["conclusion"]
+    except Exception:
+        return None, None
 
 @st.cache_data(ttl=900)
 def serie(ticker, intervalo, periodo):
@@ -181,21 +193,36 @@ if st.session_state['aviso_listo']:
 
 if st.session_state['esperando']:
     st_autorefresh(interval=30000, key="autorefresh_radar")
+    try:
+        lanz_dt = datetime.strptime(st.session_state.get('hora_lanzamiento', ''), '%Y-%m-%d %H:%M:%S')
+        minutos = max(0.0, (datetime.now(ZONA_NY) - lanz_dt).total_seconds() / 60.0)
+    except Exception:
+        minutos = 0.0
+
     fecha_sheet = leer_fecha_sheet()
-    lanz = st.session_state.get('hora_lanzamiento')
     listo = False
-    if fecha_sheet and lanz:
+    if fecha_sheet and st.session_state.get('hora_lanzamiento'):
         try:
-            listo = datetime.strptime(fecha_sheet, '%Y-%m-%d %H:%M:%S') > datetime.strptime(lanz, '%Y-%m-%d %H:%M:%S')
+            listo = datetime.strptime(fecha_sheet, '%Y-%m-%d %H:%M:%S') > datetime.strptime(st.session_state['hora_lanzamiento'], '%Y-%m-%d %H:%M:%S')
         except Exception:
             listo = False
+
     if listo:
         st.session_state['esperando'] = False
         st.session_state['aviso_listo'] = True
         cargar_datos.clear()
         st.rerun()
     else:
-        st.warning("⏳ Escaneo en curso… reviso el Sheet cada 30 segundos y te aviso aquí mismo cuando lleguen los datos nuevos.")
+        st.warning("⏳ Escaneo en curso… reviso todo cada 30 segundos y te aviso aquí mismo.")
+        st.progress(min(minutos / 15.0, 1.0), text=f"🤖 Robot trabajando… minuto {int(minutos)} de ~15")
+        st_status, st_conclusion = estado_robot()
+        if st_status == 'completed':
+            if st_conclusion == 'success':
+                st.info("✅ El robot YA terminó de escanear y está escribiendo el Sheet. En menos de 1 minuto verás el aviso verde.")
+            else:
+                st.error("❌ El robot falló en esta ejecución. Revisa GitHub → Actions para ver el detalle. El próximo escaneo horario lo reintentará.")
+        elif st_status in ('in_progress', 'queued'):
+            st.caption("🤖 Estado en GitHub Actions: **trabajando**. Todo en orden, solo falta que termine.")
         if st.button("Cancelar espera"):
             st.session_state['esperando'] = False
             st.rerun()
@@ -235,7 +262,7 @@ st.sidebar.header("🔄 Actualización manual")
 if st.sidebar.button("🚀 Lanzar escaneo ahora"):
     try:
         token = st.secrets["GH_TOKEN"]
-        url = "https://api.github.com/repos/vicroj777888-hub/radar-trading-automation/actions/workflows/actualizar_radar.yml/dispatches"
+        url = f"https://api.github.com/repos/{REPO}/actions/workflows/actualizar_radar.yml/dispatches"
         req = urllib.request.Request(
             url,
             data=json.dumps({"ref": "main"}).encode("utf-8"),
