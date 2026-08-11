@@ -33,16 +33,13 @@ NOMBRE_PESTANA = 'Radar_Senales'
 ZONA_NY = ZoneInfo("America/New_York")
 
 watchlist = [
-    'SPY', 'QQQ', 'BAC', 'PFE', 'F', 'SOFI', 'CCL', 'AAL', 'SNAP', 'PLTR', 'HOOD', 'VALE', 'T',
-    'SLV', 'USO', 'AAPL', 'META', 'AMZN', 'TNA', 'GLD', 'XOM', 'CVX', 'NVDA', 'NFLX', 'MRNA', 'TSLA'
+    'F', 'T', 'PFE', 'VALE', 'AAL',
+    'BAC', 'USO', 'SOFI', 'CCL', 'NFLX'
 ]
 
 rangos_cardona = {
-    'BAC': (0.10, 0.20), 'SLV': (0.10, 0.20), 'USO': (0.10, 0.20),
-    'SPY': (0.25, 0.30), 'QQQ': (0.25, 0.30),
-    'AAPL': (0.45, 0.80), 'META': (0.45, 0.80), 'AMZN': (0.60, 0.80),
-    'TNA': (0.60, 0.80), 'GLD': (0.60, 0.80), 'XOM': (0.60, 0.80), 'CVX': (0.60, 0.80), 'NVDA': (0.60, 0.80),
-    'NFLX': (1.50, 2.50), 'MRNA': (2.00, 2.50), 'TSLA': (2.50, 3.00)
+    'BAC': (0.10, 0.20), 'USO': (0.10, 0.20),
+    'NFLX': (1.50, 2.50)
 }
 RANGO_DEFAULT = (0.10, 0.25)
 
