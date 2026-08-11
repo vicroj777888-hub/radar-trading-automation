@@ -5,7 +5,7 @@
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import gspread
 from google.oauth2.service_account import Credentials
@@ -43,10 +43,22 @@ rangos_cardona = {
 }
 RANGO_DEFAULT = (0.10, 0.25)
 
+# ==========================================
+# REGLA DEL VIERNES OBJETIVO (duración ~1 semana)
+# Lun-Mié: viernes de esta semana | Jue-Dom: viernes siguiente
+# ==========================================
+hoy_ny = datetime.now(ZONA_NY).date()
+dia_semana = hoy_ny.weekday()
+if dia_semana <= 2:
+    viernes_objetivo = hoy_ny + timedelta(days=(4 - dia_semana))
+else:
+    viernes_objetivo = hoy_ny + timedelta(days=(11 - dia_semana))
+
 resultados = []
 fecha_escaneo = datetime.now(ZONA_NY).strftime('%Y-%m-%d %H:%M:%S')
 
 print(f"🕒 Escaneo iniciado (hora Nueva York): {fecha_escaneo}")
+print(f"📅 Viernes objetivo (regla del curso): {viernes_objetivo}")
 print(f"📡 Descargando datos de {len(watchlist)} activos...")
 
 # ==========================================
@@ -85,12 +97,12 @@ for ticker in watchlist:
         vencimiento = "N/A"
 
         if hasattr(ticker_obj, 'options') and ticker_obj.options:
-            today = datetime.now().date()
             fechas_disp = [datetime.strptime(d, "%Y-%m-%d").date() for d in ticker_obj.options]
-            fechas_futuras = sorted([d for d in fechas_disp if d >= today])
+            fechas_futuras = sorted([d for d in fechas_disp if d >= hoy_ny])
 
             if fechas_futuras:
-                vencimiento = fechas_futuras[0].strftime("%Y-%m-%d")
+                vencimiento_date = min(fechas_futuras, key=lambda d: abs((d - viernes_objetivo).days))
+                vencimiento = vencimiento_date.strftime("%Y-%m-%d")
                 chain = ticker_obj.option_chain(vencimiento)
 
                 calls_otm = chain.calls[chain.calls['strike'] > precio_spot].sort_values('strike')
