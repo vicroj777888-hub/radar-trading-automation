@@ -230,8 +230,8 @@ if st.session_state['esperando']:
             st.session_state['esperando'] = False
             st.rerun()
 
-calls_v = int(df['CALL Estado'].astype(str).str.contains('VIABLE', na=False).sum())
-puts_v = int(df['PUT Estado'].astype(str).str.contains('VIABLE', na=False).sum())
+calls_v = int(df['Call Estado'].astype(str).str.contains('VIABLE', na=False).sum())
+puts_v = int(df['Put Estado'].astype(str).str.contains('VIABLE', na=False).sum())
 latentes = int((df['Condicion 3: Zona Diario'] == 'En Piso Fuerte').sum())
 total = len(df)
 k1, k2, k3, k4 = st.columns(4)
