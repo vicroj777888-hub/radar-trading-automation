@@ -1,350 +1,578 @@
-import streamlit as st
-import pandas as pd
+# ==========================================
+# MÉTODO CARDONA - AUTOMATIZACIÓN COMPLETA
+# Versión final - Todas las estrategias
+# ==========================================
+
 import yfinance as yf
-import plotly.graph_objects as go
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
+import gspread
+from google.oauth2.service_account import Credentials
 import json
-import urllib.request
-from datetime import datetime
-from zoneinfo import ZoneInfo
-from streamlit_autorefresh import st_autorefresh
-import time
+import os
+import pytz
 
-st.set_page_config(page_title="Radar DSS Trading", page_icon="🎯", layout="wide")
-
-SPREADSHEET_ID = '17cu_GUSQl5CWR1UXONrLPyaKD-0l0OdlwWMmg_e-G0U'
-URL_CSV = f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/export?format=csv&gid=0"
-ZONA_NY = ZoneInfo("America/New_York")
-REPO = "vicroj777888-hub/radar-trading-automation"
-
-if 'esperando' not in st.session_state:
-    st.session_state['esperando'] = False
-if 'aviso_listo' not in st.session_state:
-    st.session_state['aviso_listo'] = False
-
-@st.cache_data(ttl=1)
-def cargar_datos():
-    url_forzada = f"{URL_CSV}&t={datetime.now().timestamp()}"
-    return pd.read_csv(url_forzada)
-
-def leer_fecha_sheet():
-    try:
-        df_tmp = pd.read_csv(URL_CSV, nrows=1)
-        return str(df_tmp['Fecha_Hora_Escaneo'].iloc[0])
-    except Exception:
-        return None
-
-def estado_robot():
-    try:
-        url = f"https://api.github.com/repos/{REPO}/actions/workflows/actualizar_radar.yml/runs?per_page=1"
-        req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json"})
-        with urllib.request.urlopen(req) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        run = data["workflow_runs"][0]
-        return run["status"], run["conclusion"]
-    except Exception:
-        return None, None
-
-@st.cache_data(ttl=900)
-def serie(ticker, intervalo, periodo):
-    df = yf.Ticker(ticker).history(period=periodo, interval=intervalo)
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    return df
-
-def requisitos_cardona(df1h, df1d):
-    d = df1d.copy()
-    d['SMA100'] = d['Close'].rolling(100).mean()
-    d['SMA200'] = d['Close'].rolling(200).mean()
-    close_d = float(d['Close'].iloc[-1])
-    o_d, h_d, c_d = float(d['Open'].iloc[-1]), float(d['High'].iloc[-1]), float(d['Close'].iloc[-1])
-    sma100 = float(d['SMA100'].iloc[-1])
-    sma200 = float(d['SMA200'].iloc[-1])
-    piso_fuerte = (abs(close_d - sma100)/sma100 <= 0.02) or (abs(close_d - sma200)/sma200 <= 0.02)
-    lejos_pisos = (abs(close_d - sma100)/sma100 > 0.03) and (abs(close_d - sma200)/sma200 > 0.03)
-    cuerpo_d = abs(c_d - o_d)
-    sombra_d = h_d - max(o_d, c_d)
-    hanger_diario = sombra_d > cuerpo_d
-
-    h = df1h.copy()
-    h['SMA20'] = h['Close'].rolling(20).mean()
-    h['SMA40'] = h['Close'].rolling(40).mean()
-    close_h = float(h['Close'].iloc[-1])
-    sma20 = float(h['SMA20'].iloc[-1])
-    sma40h = float(h['SMA40'].iloc[-1])
-    alcista_h = close_h > sma40h
-    dist_pm40 = abs(close_h - sma40h)/sma40h
-    cerca_pm40 = dist_pm40 <= 0.015
-    canal_bajista = (sma40h > sma20) and (sma40h < float(h['SMA40'].iloc[-4]))
-
-    h['fecha'] = h.index.date
-    ultima_fecha = h['fecha'].iloc[-1]
-    hoy = h[h['fecha'] == ultima_fecha]
-    antes = h[h['fecha'] < ultima_fecha]
-    prev_close = float(antes['Close'].iloc[-1]) if len(antes) > 0 else float(h['Close'].iloc[-2])
-
-    gap_alza, gap_bajista = False, False
-    primera_roja, primera_verde = False, False
-    piso_gap = None
-    if len(hoy) >= 1:
-        open_hoy = float(hoy['Open'].iloc[0])
-        gap_alza = open_hoy > prev_close
-        gap_bajista = open_hoy < prev_close
-        primera = hoy.iloc[0]
-        primera_roja = float(primera['Close']) < float(primera['Open'])
-        primera_verde = float(primera['Close']) > float(primera['Open'])
-        piso_gap = float(primera['Low'])
-
-    ruptura_piso_gap = False
-    if primera_verde and piso_gap is not None and len(hoy) > 1:
-        ruptura_piso_gap = bool((hoy.iloc[1:]['Close'] < piso_gap).any())
-
-    ultima_vela = h.iloc[-1]
-    vela_verde = float(ultima_vela['Close']) > float(ultima_vela['Open'])
-    vela_roja = float(ultima_vela['Close']) < float(ultima_vela['Open'])
-    techo_previo = float(h['High'].iloc[-21:-1].max())
-    ruptura_techo = close_h > techo_previo
-    piso_linea = float(h['Low'].iloc[-6:-1].min())
-    ruptura_piso = vela_roja and close_h < piso_linea
-
-    estrats = []
-    estrats.append({
-        'nombre': 'CALL 1: Piso Fuerte (PM100/200) + Ruptura',
-        'entrada': ' Entrada a partir de las 11:00',
-        'checks': [
-            ('Diario: en piso fuerte (PM100/PM200 ±2%)', piso_fuerte),
-            ('Hora: tendencia alcista (precio > PM40)', alcista_h),
-            ('Vela verde rompe techo / línea bajista', vela_verde and ruptura_techo),
-        ],
-        'humana': '👁 Verifica: vela verde FORMADA a partir de las 11:00 rompiendo la línea bajista. La subida suele durar 2 a 4 días.'
-    })
-    estrats.append({
-        'nombre': 'CALL 2: Rebote PM40 / Caída Normal',
-        'entrada': '⏰ Entrada a partir de las 11:00',
-        'checks': [
-            ('Tendencia alcista en hora (precio > PM40)', alcista_h),
-            ('Caída que se acercó al PM40 (≤1.5%)', cerca_pm40),
-            ('Vela verde rompe la línea bajista de la caída', vela_verde and ruptura_techo),
-        ],
-        'humana': '👁 Verifica: traza la línea bajista de la caída y espera la vela verde final formada desde las 11:00.'
-    })
-    estrats.append({
-        'nombre': 'CALL 3: Gap Bajista al Alza',
-        'entrada': ' Entrada a las 11:00',
-        'checks': [
-            ('Abrió abajo vs cierre anterior (gap bajista)', gap_bajista),
-            ('Primera vela de hora verde', primera_verde),
-            ('Tendencia alcista en hora', alcista_h),
-        ],
-        'humana': '👁 Verifica: dos velas verdes sólidas hasta las 11:00. NO comprar dentro de canales bajistas.'
-    })
-    estrats.append({
-        'nombre': 'PUT 1: Primera Vela Roja de Apertura',
-        'entrada': '⏰ ÚNICA que entra a las 10:00 en punto',
-        'checks': [
-            ('Primera vela de hora roja (martillo rojo también vale)', primera_roja),
-            ('NO está en piso fuerte', not piso_fuerte),
-            ('NO está en zona barata (lejos de PM100/200)', lejos_pisos),
-        ],
-        'humana': '👁 Verifica: vela formada a las 10:00. Si aparece sobre piso fuerte o zona barata, tiende a fallar: NO aplicar.'
-    })
-    estrats.append({
-        'nombre': 'PUT 2: Ruptura del Piso del Gap',
-        'entrada': '⏰ Entrada desde las 11:00',
-        'checks': [
-            ('Abrió con gap y primera vela verde', primera_verde and (gap_alza or gap_bajista)),
-            ('Vela roja rompe el piso del gap', ruptura_piso_gap),
-            ('Lejos del PM40 (mayor probabilidad de éxito)', not cerca_pm40),
-        ],
-        'humana': '👁 Verifica: ruptura con vela roja FORMADA desde las 11:00 en adelante. Puede dar el 100% el mismo día o al siguiente.'
-    })
-    estrats.append({
-        'nombre': 'PUT 3: Canal Bajista (Modelo 4 Pasos)',
-        'entrada': '⏰ Entrada desde las 11:00',
-        'checks': [
-            ('Paso 1: canal bajista (PM40 sobre PM20, descendente)', canal_bajista),
-            ('Paso 2: zona cara / techo', lejos_pisos or dist_pm40 > 0.015),
-            ('Paso 3: intento de subida borrado por velas rojas', ruptura_piso),
-            ('Paso 4: vela roja rompe la línea de piso trazada', ruptura_piso),
-        ],
-        'humana': '👁 Verifica: traza la línea de piso siguiendo la subida; entra cuando una vela roja la rompa.'
-    })
-    estrats.append({
-        'nombre': 'PUT 4: Hanger en Diario',
-        'entrada': ' Compra cerca del cierre (4:00 PM / SPY 4:14 PM)',
-        'checks': [
-            ('Hanger en diario (cola superior mayor al cuerpo)', hanger_diario),
-            ('Zona cara o lejos de pisos fuertes', lejos_pisos),
-        ],
-        'humana': '👁 Verifica: la vela puede cambiar durante el día; confirma cerca del cierre. El color no importa.'
-    })
-    return estrats
-
-st.title("🎯 RADAR DE FRANCOTIRADOR - DSS TRADING")
-
-df = cargar_datos()
-
-if df.empty:
-    st.error("❌ El Google Sheet está vacío. Ejecuta el robot primero.")
-    st.stop()
-
-fecha = df['Fecha_Hora_Escaneo'].iloc[0] if not df.empty else "—"
-st.caption(f" Último escaneo (hora Nueva York): {fecha}")
-
-if st.session_state['aviso_listo']:
-    st.success("✅ ¡LISTO! El escaneo llegó: los datos ya están actualizados.")
-    st.session_state['aviso_listo'] = False
-
-if st.session_state['esperando']:
-    st_autorefresh(interval=30000, key="autorefresh_radar")
-    try:
-        lanz_dt = datetime.strptime(st.session_state.get('hora_lanzamiento', ''), '%Y-%m-%d %H:%M:%S')
-        minutos = max(0.0, (datetime.now(ZONA_NY) - lanz_dt).total_seconds() / 60.0)
-    except Exception:
-        minutos = 0.0
-
-    fecha_sheet = leer_fecha_sheet()
-    listo = False
-    if fecha_sheet and st.session_state.get('hora_lanzamiento'):
-        try:
-            listo = datetime.strptime(fecha_sheet, '%Y-%m-%d %H:%M:%S') > datetime.strptime(st.session_state['hora_lanzamiento'], '%Y-%m-%d %H:%M:%S')
-        except Exception:
-            listo = False
-
-    if listo:
-        st.session_state['esperando'] = False
-        st.session_state['aviso_listo'] = True
-        cargar_datos.clear()
-        st.rerun()
-    else:
-        st.warning("⏳ Escaneo en curso… reviso todo cada 30 segundos y te aviso aquí mismo.")
-        st.progress(min(minutos / 15.0, 1.0), text=f"🤖 Robot trabajando… minuto {int(minutos)} de ~15")
-        st_status, st_conclusion = estado_robot()
-        if st_status == 'completed':
-            if st_conclusion == 'success':
-                st.info("✅ El robot YA terminó de escanear y está escribiendo el Sheet. En menos de 1 minuto verás el aviso verde.")
-            else:
-                st.error("❌ El robot falló en esta ejecución. Revisa GitHub → Actions para ver el detalle. El próximo escaneo horario lo reintentará.")
-        elif st_status in ('in_progress', 'queued'):
-            st.caption("🤖 Estado en GitHub Actions: **trabajando**. Todo en orden, solo falta que termine.")
-        if st.button("Cancelar espera"):
-            st.session_state['esperando'] = False
-            st.rerun()
-
-calls_v = int(df['Call Estado'].astype(str).str.contains('VIABLE', na=False).sum())
-puts_v = int(df['Put Estado'].astype(str).str.contains('VIABLE', na=False).sum())
-latentes = int((df['Condicion 3: Zona Diario'] == 'En Piso Fuerte').sum())
-total = len(df)
-k1, k2, k3, k4 = st.columns(4)
-k1.metric(" CALLs VIABLES", calls_v)
-k2.metric("📉 PUTs VIABLES", puts_v)
-k3.metric("👀 LATENTES (Piso Fuerte)", latentes)
-k4.metric("📡 ACTIVOS ESCANEADOS", total)
-
-st.divider()
-
-st.sidebar.header("🎛️ Panel de Control")
-ticker_sel = st.sidebar.selectbox("📊 Elige empresa para la gráfica", df['Ticker'].tolist())
-estr_filt = st.sidebar.multiselect(
-    "Estrategia Cardona",
-    options=sorted(df['Estrategia Cardona'].unique().tolist()),
-    default=sorted(df['Estrategia Cardona'].unique().tolist())
-)
-tend_filt = st.sidebar.multiselect(
-    "Tendencia 1H",
-    options=['Alcista', 'Bajista'],
-    default=['Alcista', 'Bajista']
-)
-val_filt = st.sidebar.multiselect(
-    "⏰ Hora de entrada (Validación Humana)",
-    options=sorted(df['Validación Humana'].unique().tolist()),
-    default=sorted(df['Validación Humana'].unique().tolist())
-)
-
-st.sidebar.markdown("---")
-st.sidebar.header("🔄 Actualización manual")
-
-if st.sidebar.button("🚀 Lanzar escaneo ahora"):
-    try:
-        token = st.secrets["GH_TOKEN"]
-        url = f"https://api.github.com/repos/{REPO}/actions/workflows/actualizar_radar.yml/dispatches"
-        req = urllib.request.Request(
-            url,
-            data=json.dumps({"ref": "main"}).encode("utf-8"),
-            headers={
-                "Authorization": f"token {token}",
-                "Accept": "application/vnd.github+json",
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
-        urllib.request.urlopen(req)
-        st.session_state['esperando'] = True
-        st.session_state['hora_lanzamiento'] = datetime.now(ZONA_NY).strftime('%Y-%m-%d %H:%M:%S')
-        st.sidebar.success("✅ ¡Escaneo lanzado! Te aviso cuando lleguen los datos.")
-        st.rerun()
-    except Exception as e:
-        st.sidebar.error(f" No se pudo lanzar el escaneo: {e}")
-
-if st.sidebar.button("🔃 Recargar datos del Sheet"):
-    cargar_datos.clear()
-    st.rerun()
-
-df_f = df[
-    df['Estrategia Cardona'].isin(estr_filt) &
-    df['Tendencia 1H'].isin(tend_filt) &
-    df['Validación Humana'].isin(val_filt)
+# ==========================================
+# CONFIGURACIÓN INICIAL
+# ==========================================
+SCOPES = [
+    'https://www.googleapis.com/auth/spreadsheets',
+    'https://www.googleapis.com/auth/drive'
 ]
 
-fila = df[df['Ticker'] == ticker_sel]
-if not fila.empty:
-    r = fila.iloc[0]
-    st.subheader(f"📌 {ticker_sel}: {r['Estrategia Cardona']}")
-    a, b, c, d = st.columns(4)
-    a.write(f"**Cond 1:** {r['Condicion 1: Tendencia']}")
-    b.write(f"**Cond 2:** {r['Condicion 2: Distancia PM40']}")
-    c.write(f"**Cond 3:** {r['Condicion 3: Zona Diario']}")
-    d.write(f"**✅ Validación:** {r['Validación Humana']}")
+credentials_json = os.environ['GOOGLE_CREDENTIALS']
+credentials_info = json.loads(credentials_json)
+creds = Credentials.from_service_account_info(credentials_info, scopes=SCOPES)
+gc = gspread.authorize(creds)
 
-df1h = serie(ticker_sel, "1h", "60d")
-df1d = serie(ticker_sel, "1d", "1y")
+SPREADSHEET_ID = '17cu_GUSQl5CWR1UXONrLPyaKD-0l0OdlwWMmg_e-G0U'
+TICKERS = ['F', 'T', 'PFE', 'VALE', 'AAL', 'BAC', 'USO', 'SOFI', 'CCL', 'NFLX']
+NY_TZ = pytz.timezone('America/New_York')
 
-st.subheader("📋 Verificación de Estrategias (Método Cardona)")
-for e in requisitos_cardona(df1h, df1d):
-    cumplidos = sum(1 for _, ok in e['checks'] if ok)
-    total_e = len(e['checks'])
-    estado = "🔥 LISTA PARA VERIFICAR" if cumplidos == total_e else f"{cumplidos}/{total_e} requisitos"
-    with st.expander(f"{e['nombre']}  —  {estado}"):
-        for texto, ok in e['checks']:
-            st.markdown(f"{'✅' if ok else '❌'} {texto}")
-        st.markdown(f"**{e['entrada']}**")
-        st.info(e['humana'])
-        st.checkbox(f"Lo verifiqué en el gráfico de {ticker_sel}", key=e['nombre'])
+# ==========================================
+# FUNCIONES DE ANÁLISIS TÉCNICO
+# ==========================================
 
-g1, g2 = st.columns(2)
+def obtener_datos(ticker):
+    """Obtiene datos diarios (1 año) y horarios (2 meses)"""
+    try:
+        stock = yf.Ticker(ticker)
+        datos_diarios = stock.history(period="1y", interval="1d")
+        datos_horarios = stock.history(period="2mo", interval="1h")
+        
+        if datos_diarios.empty or datos_horarios.empty:
+            return None, None, stock
+        
+        # Medias móviles diarias
+        datos_diarios['SMA20'] = datos_diarios['Close'].rolling(window=20).mean()
+        datos_diarios['SMA40'] = datos_diarios['Close'].rolling(window=40).mean()
+        datos_diarios['SMA100'] = datos_diarios['Close'].rolling(window=100).mean()
+        datos_diarios['SMA200'] = datos_diarios['Close'].rolling(window=200).mean()
+        
+        # Medias móviles horarias
+        datos_horarios['SMA20'] = datos_horarios['Close'].rolling(window=20).mean()
+        datos_horarios['SMA40'] = datos_horarios['Close'].rolling(window=40).mean()
+        
+        return datos_diarios, datos_horarios, stock
+    except Exception as e:
+        print(f"Error datos {ticker}: {e}")
+        return None, None, None
 
-df1h['SMA40'] = df1h['Close'].rolling(40).mean()
-fig1 = go.Figure()
-fig1.add_trace(go.Candlestick(
-    x=df1h.index, open=df1h['Open'], high=df1h['High'],
-    low=df1h['Low'], close=df1h['Close'], name=ticker_sel))
-fig1.add_trace(go.Scatter(x=df1h.index, y=df1h['SMA40'], name='SMA 40', line=dict(color='orange', width=2)))
-fig1.update_layout(title=f"{ticker_sel} — Velas 1H + SMA 40", xaxis_rangeslider_visible=False, height=420)
-g1.plotly_chart(fig1, use_container_width=True)
+def es_vela_verde(candle):
+    return float(candle['Close']) > float(candle['Open'])
 
-df1d['SMA100'] = df1d['Close'].rolling(100).mean()
-df1d['SMA200'] = df1d['Close'].rolling(200).mean()
-fig2 = go.Figure()
-fig2.add_trace(go.Scatter(x=df1d.index, y=df1d['Close'], name='Precio', line=dict(color='blue', width=2)))
-fig2.add_trace(go.Scatter(x=df1d.index, y=df1d['SMA100'], name='SMA 100', line=dict(color='green', width=1.5)))
-fig2.add_trace(go.Scatter(x=df1d.index, y=df1d['SMA200'], name='SMA 200', line=dict(color='red', width=1.5)))
-fig2.update_layout(title=f"{ticker_sel} — Diario: Piso 100/200", height=420)
-g2.plotly_chart(fig2, use_container_width=True)
+def es_vela_roja(candle):
+    return float(candle['Close']) < float(candle['Open'])
 
-st.divider()
+def es_martillo(candle):
+    cuerpo = abs(float(candle['Close']) - float(candle['Open']))
+    mecha_inf = min(float(candle['Open']), float(candle['Close'])) - float(candle['Low'])
+    mecha_sup = float(candle['High']) - max(float(candle['Open']), float(candle['Close']))
+    if cuerpo == 0:
+        return False
+    return mecha_inf >= (2 * cuerpo) and mecha_sup <= cuerpo
 
-st.subheader("📡 Radar de Activos")
-df_show = df_f.copy()
-df_show['Tendencia 1H'] = df_show['Tendencia 1H'].map(lambda x: f"🟢 {x}" if x == 'Alcista' else f"🔴 {x}")
-cols = ['Ticker', 'Precio Spot', 'Tendencia 1H', 'SMA 40 (1H)', 'Estrategia Cardona',
-        'Validación Humana', 'CALL Ask ($)', 'CALL Estado', 'PUT Ask ($)', 'PUT Estado']
-st.dataframe(df_show[[c for c in cols if c in df_show.columns]], use_container_width=True, hide_index=True)
+def es_hanger(candle):
+    cuerpo = abs(float(candle['Close']) - float(candle['Open']))
+    mecha_inf = min(float(candle['Open']), float(candle['Close'])) - float(candle['Low'])
+    rango = float(candle['High']) - float(candle['Low'])
+    if rango == 0:
+        return False
+    return mecha_inf >= (2 * cuerpo) and cuerpo <= rango * 0.3
+
+def es_vela_verde_fuerte(candle):
+    rango = float(candle['High']) - float(candle['Low'])
+    cuerpo = float(candle['Close']) - float(candle['Open'])
+    if rango == 0:
+        return False
+    return cuerpo > 0 and (cuerpo / rango) >= 0.6
+
+def detectar_canal_bajista(datos, num_velas=10):
+    if len(datos) < num_velas:
+        return False, None
+    ultimas = datos.tail(num_velas)
+    maximos = ultimas['High'].rolling(window=3).max().dropna()
+    if len(maximos) < 3:
+        return False, None
+    if maximos.iloc[-1] < maximos.iloc[-3]:
+        return True, float(maximos.iloc[-1])
+    return False, None
+
+# ==========================================
+# FUNCIONES DE OPCIONES
+# ==========================================
+
+def obtener_datos_opciones(stock, precio_actual):
+    """Obtiene vencimiento del viernes y strikes OTM"""
+    try:
+        expiraciones = stock.options
+        if not expiraciones:
+            return "N/A", "N/A", "N/A", "N/A", "N/A"
+        
+        hoy = datetime.now().date()
+        fecha_venc = None
+        
+        # Buscar próximo viernes
+        for exp in expiraciones:
+            try:
+                exp_date = datetime.strptime(exp, '%Y-%m-%d').date()
+                if exp_date >= hoy and exp_date.weekday() == 4:
+                    fecha_venc = exp
+                    break
+            except:
+                continue
+        
+        if not fecha_venc:
+            for exp in expiraciones:
+                try:
+                    exp_date = datetime.strptime(exp, '%Y-%m-%d').date()
+                    if exp_date >= hoy:
+                        fecha_venc = exp
+                        break
+                except:
+                    continue
+        
+        if not fecha_venc:
+            return "N/A", "N/A", "N/A", "N/A", "N/A"
+        
+        chain = stock.option_chain(fecha_venc)
+        calls = chain.calls
+        puts = chain.puts
+        
+        # Call OTM (strike > precio)
+        calls_otm = calls[calls['strike'] > precio_actual]
+        if not calls_otm.empty:
+            row = calls_otm.iloc[0]
+            strike_call = float(row['strike'])
+            call_ask = float(row['ask']) if pd.notna(row['ask']) else 0.05
+        else:
+            strike_call, call_ask = "N/A", "N/A"
+        
+        # Put OTM (strike < precio)
+        puts_otm = puts[puts['strike'] < precio_actual]
+        if not puts_otm.empty:
+            row = puts_otm.iloc[0]
+            strike_put = float(row['strike'])
+            put_ask = float(row['ask']) if pd.notna(row['ask']) else 0.05
+        else:
+            strike_put, put_ask = "N/A", "N/A"
+        
+        return str(fecha_venc), strike_call, call_ask, strike_put, put_ask
+    except Exception as e:
+        print(f"Error opciones {stock.ticker}: {e}")
+        return "N/A", "N/A", "N/A", "N/A", "N/A"
+
+# ==========================================
+# ESTRATEGIAS CALL
+# ==========================================
+
+def estrategia_pm40(datos_diarios, datos_horarios):
+    """PM 40 - PM20 sobre PM40 + caída que toca PM40"""
+    if len(datos_diarios) < 40 or len(datos_horarios) < 2:
+        return False
+    
+    pm20_d = float(datos_diarios['SMA20'].iloc[-1])
+    pm40_d = float(datos_diarios['SMA40'].iloc[-1])
+    precio_actual = float(datos_horarios['Close'].iloc[-1])
+    
+    if pm20_d <= pm40_d:
+        return False
+    
+    # Verificar caída
+    if precio_actual >= float(datos_horarios['Close'].iloc[-2]):
+        return False
+    
+    # Distancia a PM40
+    distancia = abs(precio_actual - pm40_d) / pm40_d * 100
+    return distancia <= 2.0
+
+def estrategia_caida(datos_diarios, datos_horarios):
+    """Caída Normal (<1.5%) o Fuerte (>1.5% o 5-6 puntos)"""
+    if len(datos_horarios) < 2:
+        return False, ""
+    
+    precio_actual = float(datos_horarios['Close'].iloc[-1])
+    precio_anterior = float(datos_horarios['Close'].iloc[-2])
+    
+    if precio_actual >= precio_anterior:
+        return False, ""
+    
+    caida_pct = ((precio_anterior - precio_actual) / precio_anterior) * 100
+    caida_puntos = precio_anterior - precio_actual
+    
+    if caida_pct > 1.5 or caida_puntos >= 5:
+        return True, "Caída Fuerte"
+    elif caida_pct > 0:
+        return True, "Caída Normal"
+    
+    return False, ""
+
+def estrategia_ruptura_canal(datos_horarios):
+    """Ruptura de canal bajista con vela verde fuerte o martillo"""
+    if len(datos_horarios) < 10:
+        return False
+    
+    hay_canal, techo = detectar_canal_bajista(datos_horarios)
+    if not hay_canal or techo is None:
+        return False
+    
+    ultima = datos_horarios.iloc[-1]
+    if es_vela_verde_fuerte(ultima) or es_martillo(ultima):
+        if float(ultima['Close']) > techo:
+            return True
+    
+    return False
+
+def estrategia_gap_al_alza(datos_diarios, datos_horarios):
+    """Gap alcista + 2 velas verdes o 1ra roja 2da verde fuerte"""
+    if len(datos_diarios) < 2 or len(datos_horarios) < 2:
+        return False
+    
+    cierre_ayer = float(datos_diarios['Close'].iloc[-2])
+    apertura_hoy = float(datos_horarios['Open'].iloc[0])
+    
+    if apertura_hoy <= cierre_ayer:
+        return False
+    
+    v1, v2 = datos_horarios.iloc[0], datos_horarios.iloc[1]
+    if (es_vela_verde(v1) and es_vela_verde(v2)) or \
+       (es_vela_roja(v1) and es_vela_verde_fuerte(v2)):
+        return True
+    
+    return False
+
+def estrategia_gap_bajista_al_alza(datos_diarios, datos_horarios):
+    """Abre abajo vs cierre anterior + recuperación"""
+    if len(datos_diarios) < 2 or len(datos_horarios) < 2:
+        return False
+    
+    cierre_ayer = float(datos_diarios['Close'].iloc[-2])
+    apertura_hoy = float(datos_horarios['Open'].iloc[0])
+    
+    if apertura_hoy >= cierre_ayer:
+        return False
+    
+    v1, v2 = datos_horarios.iloc[0], datos_horarios.iloc[1]
+    if (es_vela_verde(v1) and es_vela_verde(v2)) or \
+       (es_vela_roja(v1) and es_vela_verde_fuerte(v2)):
+        return True
+    
+    return False
+
+def estrategia_piso_fuerte(datos_diarios, datos_horarios):
+    """PM100 sobre PM200 + caída toca PM100 + ruptura canal en hora"""
+    if len(datos_diarios) < 200 or len(datos_horarios) < 10:
+        return False
+    
+    precio = float(datos_diarios['Close'].iloc[-1])
+    pm100 = float(datos_diarios['SMA100'].iloc[-1])
+    pm200 = float(datos_diarios['SMA200'].iloc[-1])
+    
+    if pm100 <= pm200:
+        return False
+    
+    # Verificar si está en piso fuerte
+    en_piso = (abs(precio - pm100) / pm100 <= 0.02) or \
+              (abs(precio - pm200) / pm200 <= 0.02)
+    
+    if not en_piso:
+        return False
+    
+    # Verificar ruptura de canal en hora
+    hay_canal, techo = detectar_canal_bajista(datos_horarios)
+    if not hay_canal or techo is None:
+        return False
+    
+    ultima = datos_horarios.iloc[-1]
+    if es_vela_verde_fuerte(ultima) and float(ultima['Close']) > techo:
+        return True
+    
+    return False
+
+def estrategia_primer_gap(datos_diarios, datos_horarios):
+    """Caída en zona piso fuerte + primera vela verde + volumen"""
+    if len(datos_diarios) < 200 or len(datos_horarios) < 1:
+        return False
+    
+    precio = float(datos_diarios['Close'].iloc[-1])
+    pm100 = float(datos_diarios['SMA100'].iloc[-1])
+    pm200 = float(datos_diarios['SMA200'].iloc[-1])
+    
+    # Verificar zona de piso
+    en_zona = (precio <= pm100 * 1.05) or (precio <= pm200 * 1.03)
+    if not en_zona:
+        return False
+    
+    # Primera vela debe ser verde
+    v1 = datos_horarios.iloc[0]
+    if not es_vela_verde(v1):
+        return False
+    
+    # Verificar volumen (ajustar según el activo)
+    volumen = float(v1['Volume'])
+    if volumen < 1000000:  # Mínimo 1M
+        return False
+    
+    return True
+
+# ==========================================
+# ESTRATEGIAS PUT
+# ==========================================
+
+def estrategia_primera_vela_roja(datos_horarios):
+    """Primera vela del día (9:30-10:00) debe ser roja"""
+    if len(datos_horarios) < 1:
+        return False
+    
+    v1 = datos_horarios.iloc[0]
+    return es_vela_roja(v1)
+
+def estrategia_ruptura_piso_gap(datos_horarios):
+    """Primera vela verde + vela roja rompe piso del gap"""
+    if len(datos_horarios) < 2:
+        return False
+    
+    v1 = datos_horarios.iloc[0]
+    if not es_vela_verde(v1):
+        return False
+    
+    piso_gap = float(v1['Low'])
+    ultima = datos_horarios.iloc[-1]
+    
+    if es_vela_roja(ultima) and float(ultima['Close']) < piso_gap:
+        return True
+    
+    return False
+
+def estrategia_modelo_4_pasos(datos_horarios):
+    """Canal bajista + vela verde borrada + ruptura piso"""
+    if len(datos_horarios) < 3:
+        return False
+    
+    hay_canal, techo = detectar_canal_bajista(datos_horarios)
+    if not hay_canal or techo is None:
+        return False
+    
+    v_verde = datos_horarios.iloc[-3]
+    v_roja_borra = datos_horarios.iloc[-2]
+    v_roja_rompe = datos_horarios.iloc[-1]
+    
+    if not (es_vela_verde(v_verde) and es_vela_roja(v_roja_borra) and \
+            es_vela_roja(v_roja_rompe)):
+        return False
+    
+    if float(v_roja_borra['Close']) >= float(v_verde['Close']):
+        return False
+    
+    # Calcular piso interno del canal
+    minimos = datos_horarios.tail(10)['Low'].rolling(window=3).min().dropna()
+    if len(minimos) < 3:
+        return False
+    
+    piso_interno = (techo + float(minimos.iloc[-1])) / 2
+    
+    if float(v_roja_rompe['Close']) >= piso_interno:
+        return False
+    
+    return True
+
+def estrategia_hanger_diario(datos_diarios):
+    """Hanger en diario (martillo invertido en tendencia alcista)"""
+    if len(datos_diarios) < 20:
+        return False
+    
+    ultima = datos_diarios.iloc[-1]
+    if not es_hanger(ultima):
+        return False
+    
+    # Verificar tendencia alcista
+    pm20_actual = float(datos_diarios['SMA20'].iloc[-1])
+    pm20_anterior = float(datos_diarios['SMA20'].iloc[-10]) if len(datos_diarios) >= 30 else pm20_actual
+    
+    if pm20_actual <= pm20_anterior:
+        return False
+    
+    return True
+
+# ==========================================
+# ANÁLISIS PRINCIPAL
+# ==========================================
+
+def analizar_activo(ticker):
+    """Analiza todas las estrategias para un activo"""
+    print(f"Analizando {ticker}...")
+    
+    datos_diarios, datos_horarios, stock = obtener_datos(ticker)
+    if datos_diarios is None or datos_horarios is None:
+        return None
+    
+    precio = float(datos_horarios['Close'].iloc[-1])
+    estrategias_call = []
+    estrategias_put = []
+    
+    # ===== CALL =====
+    if estrategia_pm40(datos_diarios, datos_horarios):
+        estrategias_call.append("PM 40")
+    
+    caida_activa, tipo = estrategia_caida(datos_diarios, datos_horarios)
+    if caida_activa:
+        estrategias_call.append(tipo)
+    
+    if estrategia_ruptura_canal(datos_horarios):
+        estrategias_call.append("Ruptura Canal Bajista")
+    
+    if estrategia_gap_al_alza(datos_diarios, datos_horarios):
+        estrategias_call.append("Gap al Alza")
+    
+    if estrategia_gap_bajista_al_alza(datos_diarios, datos_horarios):
+        estrategias_call.append("Gap Bajista al Alza")
+    
+    if estrategia_piso_fuerte(datos_diarios, datos_horarios):
+        estrategias_call.append("Piso Fuerte")
+    
+    if estrategia_primer_gap(datos_diarios, datos_horarios):
+        estrategias_call.append("Primer Gap al Alza")
+    
+    # ===== PUT =====
+    if estrategia_primera_vela_roja(datos_horarios):
+        estrategias_put.append("Primera Vela Roja")
+    
+    if estrategia_ruptura_piso_gap(datos_horarios):
+        estrategias_put.append("Ruptura Piso del Gap")
+    
+    if estrategia_modelo_4_pasos(datos_horarios):
+        estrategias_put.append("Modelo 4 Pasos")
+    
+    if estrategia_hanger_diario(datos_diarios):
+        estrategias_put.append("Hanger en Diario")
+    
+    # Determinar estrategia principal
+    if estrategias_call and not estrategias_put:
+        estrategia_ppal = estrategias_call[0]
+    elif estrategias_put and not estrategias_call:
+        estrategia_ppal = estrategias_put[0]
+    elif estrategias_call and estrategias_put:
+        estrategia_ppal = f"{estrategias_call[0]} + {estrategias_put[0]}"
+    else:
+        estrategia_ppal = "Sin Estrategia Clara"
+    
+    # Tendencia 1H
+    sma40 = float(datos_horarios['SMA40'].iloc[-1]) if len(datos_horarios) >= 40 else precio
+    tendencia = "Alcista" if precio > sma40 else "Bajista"
+    
+    # Distancia PM40
+    distancia_pm40 = f"{((precio - sma40) / sma40 * 100):.2f}%" if sma40 > 0 else "N/A"
+    
+    # Zona diario
+    pm100 = float(datos_diarios['SMA100'].iloc[-1])
+    pm200 = float(datos_diarios['SMA200'].iloc[-1])
+    en_piso = (abs(precio - pm100) / pm100 <= 0.02) or (abs(precio - pm200) / pm200 <= 0.02)
+    zona_diario = "En Piso Fuerte" if en_piso else "Fuera de Piso"
+    
+    # Validación humana (horario)
+    ahora_ny = datetime.now(NY_TZ)
+    if "Primera Vela Roja" in estrategia_ppal:
+        validacion = "10:00 - Entrada única"
+    elif ahora_ny.hour >= 11:
+        validacion = "11:00+ - Verificar vela formada"
+    elif ahora_ny.hour >= 15 and ahora_ny.minute >= 55:
+        validacion = "15:58 - Cerca del cierre"
+    else:
+        validacion = "Esperar confirmación"
+    
+    # Obtener opciones
+    venc, strike_call, call_ask, strike_put, put_ask = obtener_datos_opciones(stock, precio)
+    
+    # CALL/PUT Estado
+    call_estado = "VIABLE" if len(estrategias_call) > 0 and tendencia == "Alcista" else "NO VIABLE"
+    put_estado = "VIABLE" if len(estrategias_put) > 0 and tendencia == "Bajista" else "NO VIABLE"
+    
+    return {
+        'Ticker': ticker,
+        'Fecha_Hora_Escaneo': datetime.now(NY_TZ).strftime('%Y-%m-%d %H:%M:%S'),
+        'Precio Spot': round(precio, 2),
+        'Tendencia 1H': tendencia,
+        'SMA 40 (1H)': round(sma40, 2),
+        'Estrategia Cardona': estrategia_ppal,
+        'Condicion 1: Tendencia': tendencia,
+        'Condicion 2: Distancia PM40': distancia_pm40,
+        'Condicion 3: Zona Diario': zona_diario,
+        'Validación Humana': validacion,
+        'Vencimiento': venc,
+        'Strike Call OTM': strike_call,
+        'Call Ask ($)': call_ask,
+        'CALL Estado': call_estado,
+        'Strike Put OTM': strike_put,
+        'Put Ask ($)': put_ask,
+        'PUT Estado': put_estado
+    }
+
+# ==========================================
+# GUARDAR EN SHEET
+# ==========================================
+
+def guardar_en_sheet(resultados):
+    try:
+        sh = gc.open_by_key(SPREADSHEET_ID)
+        worksheet = sh.sheet1
+        worksheet.clear()
+        
+        headers = [
+            'Ticker', 'Fecha_Hora_Escaneo', 'Precio Spot', 'Tendencia 1H',
+            'SMA 40 (1H)', 'Estrategia Cardona', 'Condicion 1: Tendencia',
+            'Condicion 2: Distancia PM40', 'Condicion 3: Zona Diario',
+            'Validación Humana', 'Vencimiento', 'Strike Call OTM',
+            'Call Ask ($)', 'CALL Estado', 'Strike Put OTM',
+            'Put Ask ($)', 'PUT Estado'
+        ]
+        worksheet.append_row(headers)
+        
+        for r in resultados:
+            if r is None:
+                continue
+            worksheet.append_row([
+                r['Ticker'], r['Fecha_Hora_Escaneo'], r['Precio Spot'],
+                r['Tendencia 1H'], r['SMA 40 (1H)'], r['Estrategia Cardona'],
+                r['Condicion 1: Tendencia'], r['Condicion 2: Distancia PM40'],
+                r['Condicion 3: Zona Diario'], r['Validación Humana'],
+                r['Vencimiento'], r['Strike Call OTM'], r['Call Ask ($)'],
+                r['CALL Estado'], r['Strike Put OTM'], r['Put Ask ($)'],
+                r['PUT Estado']
+            ])
+        
+        print(f"✅ Guardados {len(resultados)} activos")
+        return True
+    except Exception as e:
+        print(f"❌ Error guardando: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+# ==========================================
+# MAIN
+# ==========================================
+
+def main():
+    print(f"\n{'='*60}")
+    print(f"MÉTODO CARDONA - Escaneo")
+    print(f"Fecha: {datetime.now(NY_TZ).strftime('%Y-%m-%d %H:%M:%S')} (NY)")
+    print(f"Tickers: {', '.join(TICKERS)}")
+    print(f"{'='*60}\n")
+    
+    resultados = []
+    for ticker in TICKERS:
+        resultado = analizar_activo(ticker)
+        if resultado:
+            resultados.append(resultado)
+    
+    guardar_en_sheet(resultados)
+    
+    print(f"\n{'='*60}")
+    print("RESUMEN:")
+    for r in resultados:
+        print(f"{r['Ticker']}: {r['Estrategia Cardona']} | CALL: {r['CALL Estado']} | PUT: {r['PUT Estado']}")
+    print(f"{'='*60}\n")
+
+if __name__ == '__main__':
+    main()
