@@ -1,6 +1,6 @@
 # ==========================================
 # MÉTODO CARDONA - AUTOMATIZACIÓN COMPLETA
-# 7 Estrategias CALL + 4 Estrategias PUT
+# Compatible con app.py (Streamlit)
 # ==========================================
 
 import yfinance as yf
@@ -30,8 +30,11 @@ gc = gspread.authorize(creds)
 # ID del Google Sheet
 SPREADSHEET_ID = '17cu_GUSQl5CWR1UXONrLPyaKD-0l0OdlwWMmg_e-G0U'
 
-# Activos a analizar
-TICKERS = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'NVDA', 'META', 'AMD', 'NFLX', 'SPY', 'QQQ', 'IWM', 'DIA']
+# Tickers específicos (lista acordada)
+TICKERS = ['F', 'T', 'PFE', 'VALE', 'AAL', 'BAC', 'USO', 'SOFI', 'CCL', 'NFLX']
+
+# Zona horaria Nueva York
+NY_TZ = pytz.timezone('America/New_York')
 
 # ==========================================
 # FUNCIONES AUXILIARES
@@ -52,14 +55,12 @@ def obtener_datos(ticker):
             return None, None
         
         # Calcular medias móviles en datos diarios
-        datos_diarios['PM20'] = datos_diarios['Close'].rolling(window=20).mean()
-        datos_diarios['PM40'] = datos_diarios['Close'].rolling(window=40).mean()
-        datos_diarios['PM100'] = datos_diarios['Close'].rolling(window=100).mean()
-        datos_diarios['PM200'] = datos_diarios['Close'].rolling(window=200).mean()
+        datos_diarios['SMA100'] = datos_diarios['Close'].rolling(window=100).mean()
+        datos_diarios['SMA200'] = datos_diarios['Close'].rolling(window=200).mean()
         
         # Calcular medias móviles en datos horarios
-        datos_horarios['PM20'] = datos_horarios['Close'].rolling(window=20).mean()
-        datos_horarios['PM40'] = datos_horarios['Close'].rolling(window=40).mean()
+        datos_horarios['SMA20'] = datos_horarios['Close'].rolling(window=20).mean()
+        datos_horarios['SMA40'] = datos_horarios['Close'].rolling(window=40).mean()
         
         return datos_diarios, datos_horarios
     except Exception as e:
@@ -75,7 +76,7 @@ def es_vela_roja(candle):
     return candle['Close'] < candle['Open']
 
 def es_martillo(candle):
-    """Detecte si es vela tipo Martillo/Hammer"""
+    """Detecta si es vela tipo Martillo/Hammer"""
     cuerpo = abs(candle['Close'] - candle['Open'])
     mecha_inferior = min(candle['Open'], candle['Close']) - candle['Low']
     mecha_superior = candle['High'] - max(candle['Open'], candle['Close'])
@@ -84,7 +85,7 @@ def es_martillo(candle):
     return mecha_inferior >= (2 * cuerpo) and mecha_superior <= cuerpo
 
 def es_hanger(candle):
-    """Detecte si es vela tipo Hanger (martillo invertido en tendencia alcista)"""
+    """Detecta si es vela tipo Hanger (martillo invertido en tendencia alcista)"""
     cuerpo = abs(candle['Close'] - candle['Open'])
     mecha_inferior = min(candle['Open'], candle['Close']) - candle['Low']
     mecha_superior = candle['High'] - max(candle['Open'], candle['Close'])
@@ -144,7 +145,7 @@ def estrategia_pm40(datos_diarios, datos_horarios):
     ultimo_diario = datos_diarios.iloc[-1]
     
     # PM20 debe estar por encima del PM40
-    if ultimo_diario['PM20'] <= ultimo_diario['PM40']:
+    if ultimo_diario['SMA100'] <= ultimo_diario['SMA200']:
         return False
     
     # Verificar caída en datos horarios
@@ -159,7 +160,7 @@ def estrategia_pm40(datos_diarios, datos_horarios):
         return False
     
     # Debe tocar o acercarse al PM40 (dentro del 2%)
-    pm40_horario = ultimo_diario['PM40']
+    pm40_horario = ultimo_diario['SMA100']
     distancia_pm40 = abs(vela_actual['Close'] - pm40_horario) / pm40_horario * 100
     
     return distancia_pm40 <= 2
@@ -173,8 +174,8 @@ def estrategia_caida(datos_diarios, datos_horarios):
     if len(datos_diarios) < 20:
         return False, ""
     
-    pm20_actual = datos_diarios['PM20'].iloc[-1]
-    pm20_anterior = datos_diarios['PM20'].iloc[-5] if len(datos_diarios) >= 25 else pm20_actual
+    pm20_actual = datos_diarios['SMA100'].iloc[-1]
+    pm20_anterior = datos_diarios['SMA100'].iloc[-5] if len(datos_diarios) >= 25 else pm20_actual
     
     if pm20_actual <= pm20_anterior:
         return False, ""
@@ -296,13 +297,13 @@ def estrategia_piso_fuerte(datos_diarios, datos_horarios):
     
     ultimo_diario = datos_diarios.iloc[-1]
     
-    if ultimo_diario['PM100'] <= ultimo_diario['PM200']:
+    if ultimo_diario['SMA100'] <= ultimo_diario['SMA200']:
         return False
     
     # Caída que toque PM100 o se acerque a PM200
     precio_actual = ultimo_diario['Close']
-    pm100 = ultimo_diario['PM100']
-    pm200 = ultimo_diario['PM200']
+    pm100 = ultimo_diario['SMA100']
+    pm200 = ultimo_diario['SMA200']
     
     toca_pm100 = abs(precio_actual - pm100) / pm100 * 100 <= 2
     acerca_pm200 = abs(precio_actual - pm200) / pm200 * 100 <= 3
@@ -345,8 +346,8 @@ def estrategia_primer_gap_al_alza(datos_diarios, datos_horarios):
     
     ultimo_diario = datos_diarios.iloc[-1]
     precio_actual = ultimo_diario['Close']
-    pm100 = ultimo_diario['PM100']
-    pm200 = ultimo_diario['PM200']
+    pm100 = ultimo_diario['SMA100']
+    pm200 = ultimo_diario['SMA200']
     
     en_zona_piso = precio_actual <= pm100 * 1.05 or precio_actual <= pm200 * 1.03
     
@@ -469,8 +470,8 @@ def estrategia_hanger_diario(datos_diarios):
     if len(datos_diarios) < 20:
         return False
     
-    pm20_actual = datos_diarios['PM20'].iloc[-1]
-    pm20_anterior = datos_diarios['PM20'].iloc[-10] if len(datos_diarios) >= 30 else pm20_actual
+    pm20_actual = datos_diarios['SMA100'].iloc[-1]
+    pm20_anterior = datos_diarios['SMA100'].iloc[-10] if len(datos_diarios) >= 30 else pm20_actual
     
     if pm20_actual <= pm20_anterior:
         return False
@@ -482,7 +483,7 @@ def estrategia_hanger_diario(datos_diarios):
 # ==========================================
 
 def analizar_activo(ticker):
-    """Analiza todas las estrategias para un activo"""
+    """Analiza todas las estrategias para un activo y devuelve datos en formato compatible con app.py"""
     print(f"\nAnalizando {ticker}...")
     
     datos_diarios, datos_horarios = obtener_datos(ticker)
@@ -490,61 +491,129 @@ def analizar_activo(ticker):
     if datos_diarios is None or datos_horarios is None:
         return None
     
-    resultados = {
-        'ticker': ticker,
-        'fecha': datetime.now().strftime('%Y-%m-%d'),
-        'hora_actual': datetime.now().strftime('%H:%M'),
-        'precio_actual': datos_horarios['Close'].iloc[-1],
-        'estrategias_call': [],
-        'estrategias_put': []
-    }
+    # Obtener precio actual
+    precio_actual = float(datos_horarios['Close'].iloc[-1])
     
-    # ===== ESTRATEGIAS CALL =====
+    # Calcular SMA40 (1H)
+    sma40_1h = float(datos_horarios['SMA40'].iloc[-1]) if len(datos_horarios) >= 40 else None
+    
+    # Determinar tendencia 1H
+    if sma40_1h and precio_actual > sma40_1h:
+        tendencia_1h = "Alcista"
+    else:
+        tendencia_1h = "Bajista"
+    
+    # Verificar piso fuerte (diario)
+    ultimo_diario = datos_diarios.iloc[-1]
+    pm100 = ultimo_diario['SMA100']
+    pm200 = ultimo_diario['SMA200']
+    
+    en_piso_fuerte = (abs(precio_actual - pm100) / pm100 <= 0.02) or (abs(precio_actual - pm200) / pm200 <= 0.02)
+    zona_diario = "En Piso Fuerte" if en_piso_fuerte else "Fuera de Piso"
+    
+    # Detectar estrategias CALL
+    estrategias_call = []
     
     if estrategia_pm40(datos_diarios, datos_horarios):
-        resultados['estrategias_call'].append('PM_40')
+        estrategias_call.append("PM40")
     
     caida_activa, tipo_caida = estrategia_caida(datos_diarios, datos_horarios)
     if caida_activa:
-        resultados['estrategias_call'].append(tipo_caida)
+        estrategias_call.append(tipo_caida)
     
     if estrategia_ruptura_canal_bajista(datos_horarios):
-        resultados['estrategias_call'].append('RUPTURA_CANAL_BAJISTA')
+        estrategias_call.append("Ruptura Canal Bajista")
     
     if estrategia_gap_al_alza(datos_diarios, datos_horarios):
-        resultados['estrategias_call'].append('GAP_AL_ALZA')
+        estrategias_call.append("Gap al Alza")
     
     if estrategia_gap_bajista_al_alza(datos_diarios, datos_horarios):
-        resultados['estrategias_call'].append('GAP_BAJISTA_AL_ALZA')
+        estrategias_call.append("Gap Bajista al Alza")
     
     if estrategia_piso_fuerte(datos_diarios, datos_horarios):
-        resultados['estrategias_call'].append('PISO_FUERTE')
+        estrategias_call.append("Piso Fuerte")
     
     if estrategia_primer_gap_al_alza(datos_diarios, datos_horarios):
-        resultados['estrategias_call'].append('PRIMER_GAP_AL_ALZA')
+        estrategias_call.append("Primer Gap al Alza")
     
-    # ===== ESTRATEGIAS PUT =====
+    # Detectar estrategias PUT
+    estrategias_put = []
     
     if estrategia_primera_vela_roja(datos_horarios):
-        resultados['estrategias_put'].append('PRIMERA_VELA_ROJA')
+        estrategias_put.append("Primera Vela Roja")
     
     if estrategia_ruptura_piso_gap(datos_horarios):
-        resultados['estrategias_put'].append('RUPTURA_PISO_GAP')
+        estrategias_put.append("Ruptura Piso Gap")
     
     if estrategia_modelo_4_pasos(datos_horarios):
-        resultados['estrategias_put'].append('MODELO_4_PASOS')
+        estrategias_put.append("Modelo 4 Pasos")
     
     if estrategia_hanger_diario(datos_diarios):
-        resultados['estrategias_put'].append('HANGER_DIARIO')
+        estrategias_put.append("Hanger Diario")
     
-    return resultados
+    # Determinar estrategia Cardona principal
+    if estrategias_call and not estrategias_put:
+        estrategia_cardona = estrategias_call[0]
+    elif estrategias_put and not estrategias_call:
+        estrategia_cardona = estrategias_put[0]
+    elif estrategias_call and estrategias_put:
+        # Si hay ambas, priorizar según la más fuerte
+        estrategia_cardona = f"{estrategias_call[0]} + {estrategias_put[0]}"
+    else:
+        estrategia_cardona = "Sin Estrategia Clara"
+    
+    # Determinar validación humana (hora de entrada)
+    ahora_ny = datetime.now(NY_TZ)
+    hora_actual = ahora_ny.hour
+    minuto_actual = ahora_ny.minute
+    
+    if "Primera Vela Roja" in estrategias_put:
+        validacion_humana = "10:00 - Entrada única"
+    elif hora_actual >= 11 and minuto_actual >= 1:
+        validacion_humana = "11:00+ - Verificar vela formada"
+    elif hora_actual >= 15 and minuto_actual >= 55:
+        validacion_humana = "15:58 - Cerca del cierre"
+    else:
+        validacion_humana = "Esperar confirmación"
+    
+    # Calcular distancia a PM40
+    if sma40_1h:
+        distancia_pm40 = f"{((precio_actual - sma40_1h) / sma40_1h * 100):.2f}%"
+    else:
+        distancia_pm40 = "N/A"
+    
+    # CALL Ask y PUT Ask (valores estimados - en producción vendrían de opciones reales)
+    call_ask = round(precio_actual * 1.02, 2)  # Ejemplo: 2% arriba
+    put_ask = round(precio_actual * 0.98, 2)   # Ejemplo: 2% abajo
+    
+    # Determinar estados CALL y PUT
+    call_estado = "VIABLE" if len(estrategias_call) > 0 and tendencia_1h == "Alcista" else "NO VIABLE"
+    put_estado = "VIABLE" if len(estrategias_put) > 0 and tendencia_1h == "Bajista" else "NO VIABLE"
+    
+    # Construir fila de datos compatible con app.py
+    return {
+        'Ticker': ticker,
+        'Fecha_Hora_Escaneo': ahora_ny.strftime('%Y-%m-%d %H:%M:%S'),
+        'Precio Spot': round(precio_actual, 2),
+        'Tendencia 1H': tendencia_1h,
+        'SMA 40 (1H)': round(sma40_1h, 2) if sma40_1h else "N/A",
+        'Estrategia Cardona': estrategia_cardona,
+        'Condicion 1: Tendencia': tendencia_1h,
+        'Condicion 2: Distancia PM40': distancia_pm40,
+        'Condicion 3: Zona Diario': zona_diario,
+        'Validación Humana': validacion_humana,
+        'CALL Ask ($)': call_ask,
+        'CALL Estado': call_estado,
+        'PUT Ask ($)': put_ask,
+        'PUT Estado': put_estado
+    }
 
 # ==========================================
 # GUARDAR EN GOOGLE SHEETS
 # ==========================================
 
 def guardar_en_sheet(resultados):
-    """Guarda los resultados en Google Sheets"""
+    """Guarda los resultados en Google Sheets con columnas compatibles con app.py"""
     try:
         sh = gc.open_by_key(SPREADSHEET_ID)
         worksheet = sh.sheet1
@@ -552,11 +621,22 @@ def guardar_en_sheet(resultados):
         # Limpiar hoja
         worksheet.clear()
         
-        # Headers
+        # Headers EXACTOS que espera app.py
         headers = [
-            'Ticker', 'Fecha', 'Hora', 'Precio Actual',
-            'Estrategias CALL', 'Estrategias PUT', 'Total CALL', 'Total PUT',
-            'Señal', 'Timestamp'
+            'Ticker',
+            'Fecha_Hora_Escaneo',
+            'Precio Spot',
+            'Tendencia 1H',
+            'SMA 40 (1H)',
+            'Estrategia Cardona',
+            'Condicion 1: Tendencia',
+            'Condicion 2: Distancia PM40',
+            'Condicion 3: Zona Diario',
+            'Validación Humana',
+            'CALL Ask ($)',
+            'CALL Estado',
+            'PUT Ask ($)',
+            'PUT Estado'
         ]
         worksheet.append_row(headers)
         
@@ -565,31 +645,21 @@ def guardar_en_sheet(resultados):
             if resultado is None:
                 continue
             
-            estrategias_call = ', '.join(resultado['estrategias_call']) if resultado['estrategias_call'] else 'Ninguna'
-            estrategias_put = ', '.join(resultado['estrategias_put']) if resultado['estrategias_put'] else 'Ninguna'
-            
-            total_call = len(resultado['estrategias_call'])
-            total_put = len(resultado['estrategias_put'])
-            
-            # Determinar señal
-            if total_call > total_put:
-                senal = 'CALL'
-            elif total_put > total_call:
-                senal = 'PUT'
-            else:
-                senal = 'NEUTRO'
-            
             worksheet.append_row([
-                resultado['ticker'],
-                resultado['fecha'],
-                resultado['hora_actual'],
-                round(resultado['precio_actual'], 2),
-                estrategias_call,
-                estrategias_put,
-                total_call,
-                total_put,
-                senal,
-                datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                resultado['Ticker'],
+                resultado['Fecha_Hora_Escaneo'],
+                resultado['Precio Spot'],
+                resultado['Tendencia 1H'],
+                resultado['SMA 40 (1H)'],
+                resultado['Estrategia Cardona'],
+                resultado['Condicion 1: Tendencia'],
+                resultado['Condicion 2: Distancia PM40'],
+                resultado['Condicion 3: Zona Diario'],
+                resultado['Validación Humana'],
+                resultado['CALL Ask ($)'],
+                resultado['CALL Estado'],
+                resultado['PUT Ask ($)'],
+                resultado['PUT Estado']
             ])
         
         print(f"\n✅ Datos guardados en Google Sheets. Total: {len(resultados)} activos analizados")
@@ -609,7 +679,8 @@ def main():
     """Función principal"""
     print(f"\n{'='*60}")
     print(f"MÉTODO CARDONA - Análisis de Estrategias")
-    print(f"Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Fecha: {datetime.now(NY_TZ).strftime('%Y-%m-%d %H:%M:%S')} (NY)")
+    print(f"Tickers: {', '.join(TICKERS)}")
     print(f"{'='*60}\n")
     
     resultados = []
@@ -628,12 +699,11 @@ def main():
     print(f"{'='*60}")
     
     for resultado in resultados:
-        if resultado['estrategias_call'] or resultado['estrategias_put']:
-            print(f"\n{resultado['ticker']} - ${resultado['precio_actual']:.2f}")
-            if resultado['estrategias_call']:
-                print(f"  ✅ CALL: {', '.join(resultado['estrategias_call'])}")
-            if resultado['estrategias_put']:
-                print(f"  🔻 PUT: {', '.join(resultado['estrategias_put'])}")
+        if resultado:
+            print(f"\n{resultado['Ticker']} - ${resultado['Precio Spot']:.2f}")
+            print(f"  Estrategia: {resultado['Estrategia Cardona']}")
+            print(f"  Tendencia: {resultado['Tendencia 1H']}")
+            print(f"  CALL: {resultado['CALL Estado']} | PUT: {resultado['PUT Estado']}")
 
 if __name__ == '__main__':
     main()
