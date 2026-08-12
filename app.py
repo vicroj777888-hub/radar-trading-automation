@@ -21,10 +21,10 @@ if 'esperando' not in st.session_state:
 if 'aviso_listo' not in st.session_state:
     st.session_state['aviso_listo'] = False
 
-@st.cache_data(ttl=10)
+@st.cache_data(ttl=1)
 def cargar_datos():
-    url_con_timestamp = f"{URL_CSV}&t={int(time.time())}"
-    return pd.read_csv(url_con_timestamp)
+    url_forzada = f"{URL_CSV}&t={datetime.now().timestamp()}"
+    return pd.read_csv(url_forzada)
 
 def leer_fecha_sheet():
     try:
