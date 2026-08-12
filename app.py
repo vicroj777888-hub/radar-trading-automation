@@ -1,8 +1,8 @@
 # ==========================================
 # RADAR DE FRANCOTIRADOR - DSS TRADING
-# app.py - Version FINAL corregida
+# app.py - VERSION FINAL con Panel OTM y Fuego
 # 13 de agosto de 2026
-# SIN EMOJIS: evita errores de codificacion al copiar y pegar
+# SIN emojis literales: usa codigos Unicode (el copiado no se rompe)
 # ==========================================
 
 import streamlit as st
@@ -14,6 +14,13 @@ import urllib.request
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from streamlit_autorefresh import st_autorefresh
+
+# Simbolos Unicode seguros (en el archivo son solo letras y numeros)
+FUEGO = "\U0001F525"
+CHECK = "\u2705"
+CRUZ = "\u274C"
+ALTA = "\u25B2"
+BAJA = "\u25BC"
 
 # ==========================================
 # CONFIGURACION INICIAL
@@ -227,13 +234,12 @@ if df.empty:
     st.error("El Google Sheet esta vacio. Ejecuta el robot primero.")
     st.stop()
 
-# Columnas con nombres EXACTOS (alineados con main.py)
 columnas_necesarias = [
     'Ticker', 'Fecha_Hora_Escaneo', 'Precio Spot', 'Tendencia 1H',
     'SMA 40 (1H)', 'Estrategia Cardona', 'Condicion 1: Tendencia',
     'Condicion 2: Distancia PM40', 'Condicion 3: Zona Diario',
     'Validación Humana', 'Call Estado', 'Put Estado',
-    'Call Ask ($)', 'Put Ask ($)', 'Strike Call OTM', 'Strike Put OTM'
+    'Call Ask ($)', 'Put Ask ($)', 'Strike Call OTM', 'Strike Put OTM', 'Vencimiento'
 ]
 
 columnas_faltantes = [c for c in columnas_necesarias if c not in df.columns]
@@ -241,6 +247,10 @@ if columnas_faltantes:
     st.error("Faltan columnas en el Sheet: " + str(columnas_faltantes))
     st.info("Columnas encontradas: " + ", ".join(df.columns.tolist()))
     st.stop()
+
+# Normalizar estados (quitar espacios)
+df['Call Estado'] = df['Call Estado'].astype(str).str.strip()
+df['Put Estado'] = df['Put Estado'].astype(str).str.strip()
 
 fecha = df['Fecha_Hora_Escaneo'].iloc[0]
 st.caption("Ultimo escaneo (hora Nueva York): " + str(fecha))
@@ -290,19 +300,108 @@ if st.session_state['esperando']:
             st.rerun()
 
 # ==========================================
-# METRICAS PRINCIPALES
+# CONTADORES GLOBALES (CORREGIDOS: suman el total)
 # ==========================================
 
-calls_v = int(df['Call Estado'].astype(str).str.contains('VIABLE', na=False).sum())
-puts_v = int(df['Put Estado'].astype(str).str.contains('VIABLE', na=False).sum())
-latentes = int((df['Condicion 3: Zona Diario'] == 'En Piso Fuerte').sum())
 total = len(df)
+calls_v = int((df['Call Estado'] == 'VIABLE').sum())
+puts_v = int((df['Put Estado'] == 'VIABLE').sum())
+latentes = max(0, total - calls_v - puts_v)
 
 k1, k2, k3, k4 = st.columns(4)
 k1.metric("CALLs VIABLES", calls_v)
 k2.metric("PUTs VIABLES", puts_v)
-k3.metric("LATENTES (Piso Fuerte)", latentes)
+k3.metric("LATENTES (En espera)", latentes)
 k4.metric("ACTIVOS ESCANEADOS", total)
+st.caption("CALL + PUT + LATENTES = " + str(total) + " empresas. Cada empresa cae en UNA sola categoria.")
+
+st.divider()
+
+# ==========================================
+# TABLERO OTM (METODO CARDONA)
+# ==========================================
+
+st.subheader("Tablero de Inversion OTM (Metodo Cardona)")
+
+df_ops = df.copy()
+df_ops['Spot Num'] = pd.to_numeric(df_ops['Precio Spot'], errors='coerce')
+df_ops['Strike Call Num'] = pd.to_numeric(df_ops['Strike Call OTM'], errors='coerce')
+df_ops['Strike Put Num'] = pd.to_numeric(df_ops['Strike Put OTM'], errors='coerce')
+df_ops['Call Ask Num'] = pd.to_numeric(df_ops['Call Ask ($)'], errors='coerce')
+df_ops['Put Ask Num'] = pd.to_numeric(df_ops['Put Ask ($)'], errors='coerce')
+
+def lado_fila(r):
+    if r['Call Estado'] == 'VIABLE':
+        return 'CALL'
+    if r['Put Estado'] == 'VIABLE':
+        return 'PUT'
+    return 'LATENTE'
+
+df_ops['Lado'] = df_ops.apply(lado_fila, axis=1)
+
+def strike_fila(r):
+    if r['Lado'] == 'CALL':
+        return r['Strike Call Num']
+    if r['Lado'] == 'PUT':
+        return r['Strike Put Num']
+    return None
+
+df_ops['Strike OTM'] = df_ops.apply(strike_fila, axis=1)
+
+def ask_fila(r):
+    if r['Lado'] == 'CALL':
+        return r['Call Ask Num']
+    if r['Lado'] == 'PUT':
+        return r['Put Ask Num']
+    return None
+
+df_ops['Ask Num'] = df_ops.apply(ask_fila, axis=1)
+df_ops['Costo x contrato'] = df_ops['Ask Num'] * 100.0
+
+def dist_otm(r):
+    spot = r['Spot Num']
+    strike = r['Strike OTM']
+    if pd.isna(spot) or pd.isna(strike) or spot == 0:
+        return None
+    if r['Lado'] == 'CALL':
+        return round((strike - spot) / spot * 100.0, 2)
+    if r['Lado'] == 'PUT':
+        return round((spot - strike) / spot * 100.0, 2)
+    return None
+
+df_ops['Dist OTM %'] = df_ops.apply(dist_otm, axis=1)
+
+# Empresas con senal activa (para invertir hoy)
+df_viables = df_ops[df_ops['Lado'] != 'LATENTE'].copy()
+
+if not df_viables.empty:
+    df_viables['Ask Formato'] = df_viables['Ask Num'].map(lambda v: f"{v:.2f}" if pd.notna(v) else "N/A")
+    df_viables['Costo Formato'] = df_viables['Costo x contrato'].map(lambda v: f"{v:.2f}" if pd.notna(v) else "N/A")
+    df_viables['Dist Formato'] = df_viables['Dist OTM %'].map(lambda v: f"{v:.2f}%" if pd.notna(v) else "N/A")
+
+    tabla_viables = df_viables[[
+        'Ticker', 'Lado', 'Estrategia Cardona', 'Strike OTM',
+        'Ask Formato', 'Costo Formato', 'Dist Formato', 'Vencimiento', 'Validación Humana'
+    ]].rename(columns={
+        'Ask Formato': 'Ask ($)',
+        'Costo Formato': 'Costo por contrato ($)',
+        'Dist Formato': 'Distancia OTM'
+    })
+
+    st.dataframe(tabla_viables, use_container_width=True, hide_index=True)
+    st.caption("Costo por contrato = Ask x 100 acciones. Solo compra con vela FORMADA en el horario de Validacion Humana.")
+else:
+    st.info("Hoy no hay senales activas. Revisa las empresas LATENTES abajo.")
+
+# Empresas latentes (esperar)
+df_lat = df_ops[df_ops['Lado'] == 'LATENTE'].copy()
+if not df_lat.empty:
+    with st.expander("Empresas LATENTES (esperar senal, NO comprar aun)"):
+        st.dataframe(
+            df_lat[['Ticker', 'Precio Spot', 'Condicion 3: Zona Diario', 'Estrategia Cardona']],
+            use_container_width=True,
+            hide_index=True
+        )
 
 st.divider()
 
@@ -329,6 +428,17 @@ val_filt = st.sidebar.multiselect(
     "Hora de entrada (Validacion Humana)",
     options=sorted(df['Validación Humana'].unique().tolist()),
     default=sorted(df['Validación Humana'].unique().tolist())
+)
+
+st.sidebar.markdown("---")
+st.sidebar.header("Reglas OTM (Metodo Cardona)")
+st.sidebar.markdown(
+    "- Compra SOLO opciones FUERA del dinero (OTM).\n"
+    "- CALL: strike ARRIBA del precio. PUT: strike ABAJO.\n"
+    "- Vencimiento: viernes mas cercano.\n"
+    "- PUT 1 entra a las 10:00. El resto desde las 11:00.\n"
+    "- Hanger: cerca del cierre (4:00 PM).\n"
+    "- NUNCA compres sin vela FORMADA y confirmada."
 )
 
 st.sidebar.markdown("---")
@@ -361,7 +471,7 @@ if st.sidebar.button("Recargar datos del Sheet"):
     st.rerun()
 
 # ==========================================
-# FILTROS Y DETALLE DEL ACTIVO
+# DETALLE Y TARJETA OTM DE LA EMPRESA ELEGIDA
 # ==========================================
 
 df_f = df[
@@ -370,7 +480,7 @@ df_f = df[
     df['Validación Humana'].isin(val_filt)
 ]
 
-fila = df[df['Ticker'] == ticker_sel]
+fila = df_ops[df_ops['Ticker'] == ticker_sel]
 if not fila.empty:
     r = fila.iloc[0]
     st.subheader(ticker_sel + ": " + str(r['Estrategia Cardona']))
@@ -380,27 +490,66 @@ if not fila.empty:
     c.write("**Cond 3:** " + str(r['Condicion 3: Zona Diario']))
     d.write("**Validacion:** " + str(r['Validación Humana']))
 
+    # Tarjeta OTM
+    st.markdown("**Tarjeta OTM de " + ticker_sel + "**")
+    t1, t2 = st.columns(2)
+    with t1:
+        st.markdown("**Opcion CALL (strike arriba)**")
+        st.write("Strike OTM: " + str(r['Strike Call OTM']))
+        st.write("Ask ($): " + str(r['Call Ask ($)']))
+        if r['Call Estado'] == 'VIABLE':
+            st.success(CHECK + " CALL habilitado por el metodo")
+        else:
+            st.warning(CRUZ + " CALL no viable")
+    with t2:
+        st.markdown("**Opcion PUT (strike abajo)**")
+        st.write("Strike OTM: " + str(r['Strike Put OTM']))
+        st.write("Ask ($): " + str(r['Put Ask ($)']))
+        if r['Put Estado'] == 'VIABLE':
+            st.success(CHECK + " PUT habilitado por el metodo")
+        else:
+            st.warning(CRUZ + " PUT no viable")
+
+    if r['Lado'] == 'CALL':
+        st.success(
+            FUEGO + " RECOMENDACION CARDONA: comprar CALL strike " + str(r['Strike Call OTM']) +
+            " | Ask $" + str(r['Call Ask ($)']) +
+            " | Vence " + str(r['Vencimiento']) +
+            " | Entrada: " + str(r['Validación Humana'])
+        )
+    elif r['Lado'] == 'PUT':
+        st.success(
+            FUEGO + " RECOMENDACION CARDONA: comprar PUT strike " + str(r['Strike Put OTM']) +
+            " | Ask $" + str(r['Put Ask ($)']) +
+            " | Vence " + str(r['Vencimiento']) +
+            " | Entrada: " + str(r['Validación Humana'])
+        )
+    else:
+        st.warning("Sin senal viable hoy: LATENTE. Espera a que se forme la estrategia antes de comprar opciones.")
+
 # ==========================================
-# GRAFICOS
+# GRAFICOS Y VERIFICACION CON FUEGO
 # ==========================================
 
 df1h = serie(ticker_sel, "1h", "60d")
 df1d = serie(ticker_sel, "1d", "1y")
 
 st.subheader("Verificacion de Estrategias (Metodo Cardona)")
+st.caption(FUEGO + " = estrategia con TODOS los requisitos cumplidos, lista para verificar en el grafico.")
+
 for e in requisitos_cardona(df1h, df1d):
     cumplidos = sum(1 for _, ok in e['checks'] if ok)
     total_e = len(e['checks'])
     if cumplidos == total_e:
-        estado = "LISTA PARA VERIFICAR"
+        estado = FUEGO + " LISTA PARA VERIFICAR"
     else:
         estado = str(cumplidos) + "/" + str(total_e) + " requisitos"
     with st.expander(e['nombre'] + "  --  " + estado):
         for texto, ok in e['checks']:
             if ok:
-                st.markdown("[OK] " + texto)
+                st.markdown(CHECK + " " + texto)
             else:
-                st.markdown("[X] " + texto)
+                st.markdown(CRUZ + " " + texto)
         st.markdown("**" + e['entrada'] + "**")
         st.info(e['humana'])
         st.checkbox("Lo verifique en el grafico de " + ticker_sel, key=e['nombre'])
@@ -440,6 +589,9 @@ st.divider()
 
 st.subheader("Radar de Activos")
 df_show = df_f.copy()
+df_show['Tendencia 1H'] = df_show['Tendencia 1H'].map(
+    lambda x: ALTA + " Alcista" if x == 'Alcista' else BAJA + " Bajista"
+)
 
 cols = [
     'Ticker', 'Precio Spot', 'Tendencia 1H', 'SMA 40 (1H)', 'Estrategia Cardona',
