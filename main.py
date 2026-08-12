@@ -1,6 +1,8 @@
 # ==========================================
 # MÉTODO CARDONA - AUTOMATIZACIÓN COMPLETA
 # Versión final - Todas las estrategias
+# Fecha: 13 de agosto de 2026
+# Autor: Víctor Rojas Cortez
 # ==========================================
 
 import yfinance as yf
@@ -12,6 +14,7 @@ from google.oauth2.service_account import Credentials
 import json
 import os
 import pytz
+import time
 
 # ==========================================
 # CONFIGURACIÓN INICIAL
@@ -21,10 +24,14 @@ SCOPES = [
     'https://www.googleapis.com/auth/drive'
 ]
 
-credentials_json = os.environ['GOOGLE_CREDENTIALS']
-credentials_info = json.loads(credentials_json)
-creds = Credentials.from_service_account_info(credentials_info, scopes=SCOPES)
-gc = gspread.authorize(creds)
+try:
+    credentials_json = os.environ['GOOGLE_CREDENTIALS']
+    credentials_info = json.loads(credentials_json)
+    creds = Credentials.from_service_account_info(credentials_info, scopes=SCOPES)
+    gc = gspread.authorize(creds)
+except Exception as e:
+    print(f"❌ Error crítico en autenticación: {e}")
+    raise
 
 SPREADSHEET_ID = '17cu_GUSQl5CWR1UXONrLPyaKD-0l0OdlwWMmg_e-G0U'
 TICKERS = ['F', 'T', 'PFE', 'VALE', 'AAL', 'BAC', 'USO', 'SOFI', 'CCL', 'NFLX']
@@ -42,6 +49,7 @@ def obtener_datos(ticker):
         datos_horarios = stock.history(period="2mo", interval="1h")
         
         if datos_diarios.empty or datos_horarios.empty:
+            print(f"⚠️ {ticker}: Datos vacíos")
             return None, None, stock
         
         # Medias móviles diarias
@@ -56,16 +64,19 @@ def obtener_datos(ticker):
         
         return datos_diarios, datos_horarios, stock
     except Exception as e:
-        print(f"Error datos {ticker}: {e}")
+        print(f"❌ Error obteniendo datos de {ticker}: {e}")
         return None, None, None
 
 def es_vela_verde(candle):
+    """Detecta si una vela es alcista (cierre > apertura)"""
     return float(candle['Close']) > float(candle['Open'])
 
 def es_vela_roja(candle):
+    """Detecta si una vela es bajista (cierre < apertura)"""
     return float(candle['Close']) < float(candle['Open'])
 
 def es_martillo(candle):
+    """Detecta patrón de martillo (mecha inferior >= 2x cuerpo)"""
     cuerpo = abs(float(candle['Close']) - float(candle['Open']))
     mecha_inf = min(float(candle['Open']), float(candle['Close'])) - float(candle['Low'])
     mecha_sup = float(candle['High']) - max(float(candle['Open']), float(candle['Close']))
@@ -74,6 +85,7 @@ def es_martillo(candle):
     return mecha_inf >= (2 * cuerpo) and mecha_sup <= cuerpo
 
 def es_hanger(candle):
+    """Detecta patrón de hombre colgado (martillo invertido)"""
     cuerpo = abs(float(candle['Close']) - float(candle['Open']))
     mecha_inf = min(float(candle['Open']), float(candle['Close'])) - float(candle['Low'])
     rango = float(candle['High']) - float(candle['Low'])
@@ -82,6 +94,7 @@ def es_hanger(candle):
     return mecha_inf >= (2 * cuerpo) and cuerpo <= rango * 0.3
 
 def es_vela_verde_fuerte(candle):
+    """Detecta vela verde con cuerpo >= 60% del rango total"""
     rango = float(candle['High']) - float(candle['Low'])
     cuerpo = float(candle['Close']) - float(candle['Open'])
     if rango == 0:
@@ -89,6 +102,7 @@ def es_vela_verde_fuerte(candle):
     return cuerpo > 0 and (cuerpo / rango) >= 0.6
 
 def detectar_canal_bajista(datos, num_velas=10):
+    """Detecta canal bajista analizando máximos decrecientes"""
     if len(datos) < num_velas:
         return False, None
     ultimas = datos.tail(num_velas)
@@ -123,6 +137,7 @@ def obtener_datos_opciones(stock, precio_actual):
             except:
                 continue
         
+        # Si no hay viernes, buscar próxima expiración
         if not fecha_venc:
             for exp in expiraciones:
                 try:
@@ -160,11 +175,11 @@ def obtener_datos_opciones(stock, precio_actual):
         
         return str(fecha_venc), strike_call, call_ask, strike_put, put_ask
     except Exception as e:
-        print(f"Error opciones {stock.ticker}: {e}")
+        print(f"❌ Error obteniendo opciones de {stock.ticker}: {e}")
         return "N/A", "N/A", "N/A", "N/A", "N/A"
 
 # ==========================================
-# ESTRATEGIAS CALL
+# ESTRATEGIAS CALL (7 estrategias)
 # ==========================================
 
 def estrategia_pm40(datos_diarios, datos_horarios):
@@ -317,7 +332,7 @@ def estrategia_primer_gap(datos_diarios, datos_horarios):
     return True
 
 # ==========================================
-# ESTRATEGIAS PUT
+# ESTRATEGIAS PUT (4 estrategias)
 # ==========================================
 
 def estrategia_primera_vela_roja(datos_horarios):
@@ -401,7 +416,7 @@ def estrategia_hanger_diario(datos_diarios):
 
 def analizar_activo(ticker):
     """Analiza todas las estrategias para un activo"""
-    print(f"Analizando {ticker}...")
+    print(f"🔍 Analizando {ticker}...")
     
     datos_diarios, datos_horarios, stock = obtener_datos(ticker)
     if datos_diarios is None or datos_horarios is None:
@@ -411,7 +426,7 @@ def analizar_activo(ticker):
     estrategias_call = []
     estrategias_put = []
     
-    # ===== CALL =====
+    # ===== ESTRATEGIAS CALL =====
     if estrategia_pm40(datos_diarios, datos_horarios):
         estrategias_call.append("PM 40")
     
@@ -434,7 +449,7 @@ def analizar_activo(ticker):
     if estrategia_primer_gap(datos_diarios, datos_horarios):
         estrategias_call.append("Primer Gap al Alza")
     
-    # ===== PUT =====
+    # ===== ESTRATEGIAS PUT =====
     if estrategia_primera_vela_roja(datos_horarios):
         estrategias_put.append("Primera Vela Roja")
     
@@ -484,7 +499,7 @@ def analizar_activo(ticker):
     # Obtener opciones
     venc, strike_call, call_ask, strike_put, put_ask = obtener_datos_opciones(stock, precio)
     
-    # CALL/PUT Estado
+    # CALL/PUT Estado - CORREGIDO: Usar "Call Estado" y "Put Estado" con espacio
     call_estado = "VIABLE" if len(estrategias_call) > 0 and tendencia == "Alcista" else "NO VIABLE"
     put_estado = "VIABLE" if len(estrategias_put) > 0 and tendencia == "Bajista" else "NO VIABLE"
     
@@ -502,10 +517,10 @@ def analizar_activo(ticker):
         'Vencimiento': venc,
         'Strike Call OTM': strike_call,
         'Call Ask ($)': call_ask,
-        'CALL Estado': call_estado,
+        'Call Estado': call_estado,  # ✅ CORREGIDO: "Call Estado" con espacio
         'Strike Put OTM': strike_put,
         'Put Ask ($)': put_ask,
-        'PUT Estado': put_estado
+        'Put Estado': put_estado  # ✅ CORREGIDO: "Put Estado" con espacio
     }
 
 # ==========================================
@@ -513,18 +528,20 @@ def analizar_activo(ticker):
 # ==========================================
 
 def guardar_en_sheet(resultados):
+    """Guarda resultados en Google Sheets con nombres de columnas correctos"""
     try:
         sh = gc.open_by_key(SPREADSHEET_ID)
         worksheet = sh.sheet1
         worksheet.clear()
         
+        # Headers con nombres CORRECTOS (con espacios y capitalización adecuada)
         headers = [
             'Ticker', 'Fecha_Hora_Escaneo', 'Precio Spot', 'Tendencia 1H',
             'SMA 40 (1H)', 'Estrategia Cardona', 'Condicion 1: Tendencia',
             'Condicion 2: Distancia PM40', 'Condicion 3: Zona Diario',
             'Validación Humana', 'Vencimiento', 'Strike Call OTM',
-            'Call Ask ($)', 'CALL Estado', 'Strike Put OTM',
-            'Put Ask ($)', 'PUT Estado'
+            'Call Ask ($)', 'Call Estado', 'Strike Put OTM',  # ✅ CORREGIDO
+            'Put Ask ($)', 'Put Estado'  # ✅ CORREGIDO
         ]
         worksheet.append_row(headers)
         
@@ -537,14 +554,14 @@ def guardar_en_sheet(resultados):
                 r['Condicion 1: Tendencia'], r['Condicion 2: Distancia PM40'],
                 r['Condicion 3: Zona Diario'], r['Validación Humana'],
                 r['Vencimiento'], r['Strike Call OTM'], r['Call Ask ($)'],
-                r['CALL Estado'], r['Strike Put OTM'], r['Put Ask ($)'],
-                r['PUT Estado']
+                r['Call Estado'], r['Strike Put OTM'], r['Put Ask ($)'],  # ✅ CORREGIDO
+                r['Put Estado']  # ✅ CORREGIDO
             ])
         
-        print(f"✅ Guardados {len(resultados)} activos")
+        print(f"✅ Guardados {len(resultados)} activos en Google Sheets")
         return True
     except Exception as e:
-        print(f"❌ Error guardando: {e}")
+        print(f"❌ Error guardando en Sheets: {e}")
         import traceback
         traceback.print_exc()
         return False
@@ -554,25 +571,39 @@ def guardar_en_sheet(resultados):
 # ==========================================
 
 def main():
-    print(f"\n{'='*60}")
-    print(f"MÉTODO CARDONA - Escaneo")
-    print(f"Fecha: {datetime.now(NY_TZ).strftime('%Y-%m-%d %H:%M:%S')} (NY)")
-    print(f"Tickers: {', '.join(TICKERS)}")
-    print(f"{'='*60}\n")
+    """Función principal que ejecuta el escaneo completo"""
+    print(f"\n{'='*70}")
+    print(f"🎯 MÉTODO CARDONA - RADAR DE FRANCOTIRADOR")
+    print(f"📅 Fecha: {datetime.now(NY_TZ).strftime('%Y-%m-%d %H:%M:%S')} (NY)")
+    print(f"📊 Tickers: {', '.join(TICKERS)}")
+    print(f"{'='*70}\n")
     
     resultados = []
+    exitosos = 0
+    fallidos = 0
+    
     for ticker in TICKERS:
         resultado = analizar_activo(ticker)
         if resultado:
             resultados.append(resultado)
+            exitosos += 1
+        else:
+            fallidos += 1
+        time.sleep(1)  # Evitar rate limiting
     
-    guardar_en_sheet(resultados)
+    if resultados:
+        guardar_en_sheet(resultados)
     
-    print(f"\n{'='*60}")
-    print("RESUMEN:")
+    print(f"\n{'='*70}")
+    print("📈 RESUMEN DE ESCANEO:")
+    print(f"{'='*70}")
     for r in resultados:
-        print(f"{r['Ticker']}: {r['Estrategia Cardona']} | CALL: {r['CALL Estado']} | PUT: {r['PUT Estado']}")
-    print(f"{'='*60}\n")
+        call_icon = "🟢" if r['Call Estado'] == "VIABLE" else "🔴"
+        put_icon = "🟢" if r['Put Estado'] == "VIABLE" else "🔴"
+        print(f"{r['Ticker']:5s} | {r['Estrategia Cardona']:30s} | CALL {call_icon} {r['Call Estado']:10s} | PUT {put_icon} {r['Put Estado']:10s}")
+    
+    print(f"\n✅ Exitosos: {exitosos} | ❌ Fallidos: {fallidos}")
+    print(f"{'='*70}\n")
 
 if __name__ == '__main__':
     main()
