@@ -4,3 +4,7 @@ numpy
 yfinance
 plotly
 streamlit-autorefresh
+requests
+gspread
+google-auth
+google-auth-oauthlib
