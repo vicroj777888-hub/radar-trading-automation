@@ -1,8 +1,8 @@
 # ==========================================
 # RADAR DE FRANCOTIRADOR - DSS TRADING
-# app.py - VERSION FINAL con Panel OTM y Fuego
-# 13 de agosto de 2026
-# SIN emojis literales: usa codigos Unicode (el copiado no se rompe)
+# app.py - VERSION FINAL v5 (con SIMULADOR + IA)
+# 25 de agosto de 2026
+# Sin emojis literales: constantes Unicode (copiado seguro)
 # ==========================================
 
 import streamlit as st
@@ -11,20 +11,21 @@ import yfinance as yf
 import plotly.graph_objects as go
 import json
 import urllib.request
-from datetime import datetime
+import requests
+import gspread
+from google.oauth2.service_account import Credentials
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from streamlit_autorefresh import st_autorefresh
+import time
 
-# Simbolos Unicode seguros (en el archivo son solo letras y numeros)
 FUEGO = "\U0001F525"
 CHECK = "\u2705"
 CRUZ = "\u274C"
 ALTA = "\u25B2"
 BAJA = "\u25BC"
+NEU = "\u25CF"
 
-# ==========================================
-# CONFIGURACION INICIAL
-# ==========================================
 st.set_page_config(page_title="Radar DSS Trading", layout="wide")
 
 SPREADSHEET_ID = '17cu_GUSQl5CWR1UXONrLPyaKD-0l0OdlwWMmg_e-G0U'
@@ -32,13 +33,204 @@ URL_CSV = 'https://docs.google.com/spreadsheets/d/' + SPREADSHEET_ID + '/export?
 ZONA_NY = ZoneInfo('America/New_York')
 REPO = 'vicroj777888-hub/radar-trading-automation'
 
+MAX_INVERSION = 30.0
+MAX_ABIERTAS = 5
+META_GAIN = 2.0
+COMISION = 0.0
+
+SIM_HEADERS = [
+    'NOM', 'Fecha', 'Hora', 'Simbolo', 'Strike', 'F. Exp', 'Call/Put',
+    'Cantidad', 'Precio Compra', 'Total Inv.', 'Precio Limit',
+    'Fecha Venta Prog', 'Fecha Venta', 'Precio Venta', 'Total Venta',
+    'Ganancia $', 'Ganancia %', 'Bid Actual', 'Estrategia', 'Estado',
+    'Notas', 'VI', 'DTE', 'Break Even', 'Max Loss'
+]
+
+IA_HEADERS = ['Fecha', 'Resumen', 'Lecciones', 'Recomendaciones']
+
 if 'esperando' not in st.session_state:
     st.session_state['esperando'] = False
 if 'aviso_listo' not in st.session_state:
     st.session_state['aviso_listo'] = False
 
 # ==========================================
-# CARGA DE DATOS
+# CONEXIONES (Sheet con escritura + Gemini)
+# ==========================================
+
+@st.cache_resource
+def conectar_sheet():
+    try:
+        info = json.loads(st.secrets['GOOGLE_CREDENTIALS'])
+        creds = Credentials.from_service_account_info(info, scopes=[
+            'https://www.googleapis.com/auth/spreadsheets',
+            'https://www.googleapis.com/auth/drive'
+        ])
+        return gspread.authorize(creds)
+    except Exception:
+        return None
+
+def obtener_key_gemini():
+    try:
+        k = st.secrets['GEMINI_API_KEY']
+        if k:
+            return k
+    except Exception:
+        pass
+    return ''
+
+def abrir_sim(ws_ok):
+    if ws_ok is None:
+        return None
+    try:
+        sh = ws_ok.open_by_key(SPREADSHEET_ID)
+        try:
+            return sh, sh.worksheet('SIMULADOR')
+        except Exception:
+            ws = sh.add_worksheet(title='SIMULADOR', rows="200", cols="30")
+            ws.append_row(SIM_HEADERS)
+            return sh, ws
+    except Exception:
+        return None, None
+
+def abrir_informe_ia(sh):
+    if sh is None:
+        return None
+    try:
+        return sh.worksheet('INFORME_IA')
+    except Exception:
+        ws = sh.add_worksheet(title='INFORME_IA', rows="100", cols="10")
+        ws.append_row(IA_HEADERS)
+        return ws
+
+def leer_sim(ws):
+    try:
+        return [dict(f) for f in ws.get_all_records()]
+    except Exception:
+        return []
+
+def escribir_sim(ws, filas):
+    try:
+        ws.clear()
+        ws.append_row(SIM_HEADERS)
+        for f in filas:
+            ws.append_row([str(f.get(h, '')) for h in SIM_HEADERS])
+        return True
+    except Exception:
+        return False
+
+# ==========================================
+# HELPERS SIMULADOR
+# ==========================================
+
+def viernes_venta_prog(fecha_ny):
+    wd = fecha_ny.weekday()
+    if wd <= 2:
+        delta = 4 - wd
+    elif wd == 3:
+        delta = 8
+    elif wd == 4:
+        delta = 7
+    elif wd == 5:
+        delta = 6
+    else:
+        delta = 5
+    return fecha_ny + timedelta(days=delta)
+
+def bid_de_cadena(chain, strike, lado):
+    try:
+        df = chain.calls if lado == 'CALL' else chain.puts
+        m = df[df['strike'] == float(strike)]
+        if m.empty:
+            return 0.0
+        r = m.iloc[0]
+        bid = float(r['bid']) if pd.notna(r['bid']) else 0.0
+        last = float(r['lastPrice']) if pd.notna(r['lastPrice']) else 0.0
+        return round(bid if bid > 0 else last, 2)
+    except Exception:
+        return 0.0
+
+def bid_actual_posicion(simbolo, exp, strike, lado):
+    try:
+        chain = yf.Ticker(simbolo).option_chain(exp)
+        return bid_de_cadena(chain, strike, lado)
+    except Exception:
+        return 0.0
+
+def cerrar_fila(row, bid, hoy_str, nota):
+    try:
+        compra = float(row['Precio Compra'])
+    except Exception:
+        compra = 0.0
+    row['Estado'] = 'CERRADA'
+    row['Fecha Venta'] = hoy_str
+    row['Precio Venta'] = bid
+    row['Total Venta'] = round(bid * 100.0, 2)
+    row['Ganancia $'] = round((bid - compra) * 100.0, 2)
+    row['Ganancia %'] = round((bid / compra - 1.0) * 100.0, 2) if compra > 0 else 0.0
+    row['Notas'] = str(row.get('Notas', '')) + ' | ' + nota
+
+def gan_pct_viva(row):
+    try:
+        compra = float(row['Precio Compra'])
+        bid = float(row.get('Bid Actual', 0) or 0)
+        if compra > 0 and bid > 0:
+            return (bid / compra - 1.0) * 100.0
+    except Exception:
+        pass
+    return 0.0
+
+# ==========================================
+# GEMINI (informe semanal con memoria)
+# ==========================================
+
+MODELOS = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-flash-latest']
+
+def limpiar_json(txt):
+    txt = txt.strip()
+    fence = chr(96) * 3
+    if txt.startswith(fence):
+        txt = txt.replace(fence, '')
+        if txt.startswith('json'):
+            txt = txt[4:]
+    return txt.strip()
+
+def informe_gemini(cerradas, lecciones_previas, key):
+    lineas = []
+    for f in cerradas:
+        lineas.append(
+            str(f.get('Simbolo')) + ' ' + str(f.get('Call/Put')) + ' | ' +
+            str(f.get('Estrategia')) + ' | compra ' + str(f.get('Precio Compra')) +
+            ' | venta ' + str(f.get('Precio Venta')) + ' | ' + str(f.get('Ganancia %')) +
+            '% | ' + str(f.get('Notas'))
+        )
+    prompt = "Eres el analista jefe del Metodo Cardona en opciones OTM.\n"
+    prompt += "OPERACIONES CERRADAS DEL SIMULADOR:\n" + "\n".join(lineas) + "\n\n"
+    prompt += "LECCIONES DE SEMANAS ANTERIORES:\n" + (lecciones_previas or 'ninguna aun') + "\n\n"
+    prompt += """Responde UNICAMENTE con este JSON valido, en espanol:
+{
+ "resumen": "resumen de 3-4 frases del desempeno total",
+ "win_rate_por_estrategia": {"nombre estrategia": "porcentaje de aciertos"},
+ "lecciones": ["lecciones nuevas aprendidas, cortas y accionables"],
+ "recomendaciones": ["reglas concretas a aplicar la proxima semana"]
+}"""
+    for modelo in MODELOS:
+        url = 'https://generativelanguage.googleapis.com/v1beta/models/' + modelo + ':generateContent?key=' + key
+        body = {
+            'contents': [{'parts': [{'text': prompt}]}],
+            'generationConfig': {'temperature': 0.4, 'responseMimeType': 'application/json'}
+        }
+        try:
+            r = requests.post(url, json=body, timeout=60)
+            if r.status_code == 200:
+                txt = r.json()['candidates'][0]['content']['parts'][0]['text']
+                return json.loads(limpiar_json(txt))
+        except Exception:
+            pass
+        time.sleep(2)
+    return None
+
+# ==========================================
+# CARGA DE DATOS DEL RADAR
 # ==========================================
 
 @st.cache_data(ttl=60)
@@ -138,7 +330,6 @@ def requisitos_cardona(df1h, df1d):
     ruptura_piso = vela_roja and close_h < piso_linea
 
     estrats = []
-
     estrats.append({
         'nombre': 'CALL 1: Piso Fuerte (PM100/200) + Ruptura',
         'entrada': 'Entrada a partir de las 11:00',
@@ -149,7 +340,6 @@ def requisitos_cardona(df1h, df1d):
         ],
         'humana': 'Verifica: vela verde FORMADA a partir de las 11:00 rompiendo la linea bajista. La subida suele durar 2 a 4 dias.'
     })
-
     estrats.append({
         'nombre': 'CALL 2: Rebote PM40 / Caida Normal',
         'entrada': 'Entrada a partir de las 11:00',
@@ -160,7 +350,6 @@ def requisitos_cardona(df1h, df1d):
         ],
         'humana': 'Verifica: traza la linea bajista de la caida y espera la vela verde final formada desde las 11:00.'
     })
-
     estrats.append({
         'nombre': 'CALL 3: Gap Bajista al Alza',
         'entrada': 'Entrada a las 11:00',
@@ -171,7 +360,6 @@ def requisitos_cardona(df1h, df1d):
         ],
         'humana': 'Verifica: dos velas verdes solidas hasta las 11:00. NO comprar dentro de canales bajistas.'
     })
-
     estrats.append({
         'nombre': 'PUT 1: Primera Vela Roja de Apertura',
         'entrada': 'UNICA que entra a las 10:00 en punto',
@@ -182,7 +370,6 @@ def requisitos_cardona(df1h, df1d):
         ],
         'humana': 'Verifica: vela formada a las 10:00. Si aparece sobre piso fuerte o zona barata, tiende a fallar: NO aplicar.'
     })
-
     estrats.append({
         'nombre': 'PUT 2: Ruptura del Piso del Gap',
         'entrada': 'Entrada desde las 11:00',
@@ -193,7 +380,6 @@ def requisitos_cardona(df1h, df1d):
         ],
         'humana': 'Verifica: ruptura con vela roja FORMADA desde las 11:00 en adelante. Puede dar el 100% el mismo dia o al siguiente.'
     })
-
     estrats.append({
         'nombre': 'PUT 3: Canal Bajista (Modelo 4 Pasos)',
         'entrada': 'Entrada desde las 11:00',
@@ -205,7 +391,6 @@ def requisitos_cardona(df1h, df1d):
         ],
         'humana': 'Verifica: traza la linea de piso siguiendo la subida; entra cuando una vela roja la rompa.'
     })
-
     estrats.append({
         'nombre': 'PUT 4: Hanger en Diario',
         'entrada': 'Compra cerca del cierre (4:00 PM / SPY 4:14 PM)',
@@ -215,7 +400,6 @@ def requisitos_cardona(df1h, df1d):
         ],
         'humana': 'Verifica: la vela puede cambiar durante el dia; confirma cerca del cierre. El color no importa.'
     })
-
     return estrats
 
 # ==========================================
@@ -223,6 +407,11 @@ def requisitos_cardona(df1h, df1d):
 # ==========================================
 
 st.title("RADAR DE FRANCOTIRADOR - DSS TRADING")
+
+GC = conectar_sheet()
+KEY_G = obtener_key_gemini()
+sh_sim, ws_sim = abrir_sim(GC)
+filas_sim = leer_sim(ws_sim) if ws_sim else []
 
 try:
     df = cargar_datos()
@@ -245,10 +434,8 @@ columnas_necesarias = [
 columnas_faltantes = [c for c in columnas_necesarias if c not in df.columns]
 if columnas_faltantes:
     st.error("Faltan columnas en el Sheet: " + str(columnas_faltantes))
-    st.info("Columnas encontradas: " + ", ".join(df.columns.tolist()))
     st.stop()
 
-# Normalizar estados (quitar espacios)
 df['Call Estado'] = df['Call Estado'].astype(str).str.strip()
 df['Put Estado'] = df['Put Estado'].astype(str).str.strip()
 
@@ -258,10 +445,6 @@ st.caption("Ultimo escaneo (hora Nueva York): " + str(fecha))
 if st.session_state['aviso_listo']:
     st.success("LISTO. El escaneo llego: los datos ya estan actualizados.")
     st.session_state['aviso_listo'] = False
-
-# ==========================================
-# PANEL DE ESPERA DEL ROBOT
-# ==========================================
 
 if st.session_state['esperando']:
     st_autorefresh(interval=30000, key="autorefresh_radar")
@@ -290,17 +473,17 @@ if st.session_state['esperando']:
         st_status, st_conclusion = estado_robot()
         if st_status == 'completed':
             if st_conclusion == 'success':
-                st.info("El robot YA termino de escanear y esta escribiendo el Sheet. En menos de 1 minuto veras el aviso verde.")
+                st.info("El robot YA termino. En menos de 1 minuto veras el aviso verde.")
             else:
-                st.error("El robot fallo en esta ejecucion. Revisa GitHub Actions para ver el detalle.")
+                st.error("El robot fallo. Revisa GitHub Actions.")
         elif st_status in ('in_progress', 'queued'):
-            st.caption("Estado en GitHub Actions: trabajando. Todo en orden, solo falta que termine.")
+            st.caption("Estado en GitHub Actions: trabajando.")
         if st.button("Cancelar espera"):
             st.session_state['esperando'] = False
             st.rerun()
 
 # ==========================================
-# CONTADORES GLOBALES (CORREGIDOS: suman el total)
+# CONTADORES GLOBALES
 # ==========================================
 
 total = len(df)
@@ -313,12 +496,12 @@ k1.metric("CALLs VIABLES", calls_v)
 k2.metric("PUTs VIABLES", puts_v)
 k3.metric("LATENTES (En espera)", latentes)
 k4.metric("ACTIVOS ESCANEADOS", total)
-st.caption("CALL + PUT + LATENTES = " + str(total) + " empresas. Cada empresa cae en UNA sola categoria.")
+st.caption("CALL + PUT + LATENTES = " + str(total) + " empresas.")
 
 st.divider()
 
 # ==========================================
-# TABLERO OTM (METODO CARDONA)
+# TABLERO OTM
 # ==========================================
 
 st.subheader("Tablero de Inversion OTM (Metodo Cardona)")
@@ -371,7 +554,6 @@ def dist_otm(r):
 
 df_ops['Dist OTM %'] = df_ops.apply(dist_otm, axis=1)
 
-# Empresas con senal activa (para invertir hoy)
 df_viables = df_ops[df_ops['Lado'] != 'LATENTE'].copy()
 
 if not df_viables.empty:
@@ -387,63 +569,128 @@ if not df_viables.empty:
         'Costo Formato': 'Costo por contrato ($)',
         'Dist Formato': 'Distancia OTM'
     })
-
     st.dataframe(tabla_viables, use_container_width=True, hide_index=True)
-    st.caption("Costo por contrato = Ask x 100 acciones. Solo compra con vela FORMADA en el horario de Validacion Humana.")
+    st.caption("Costo por contrato = Ask x 100. Solo compra con vela FORMADA en el horario de Validacion Humana.")
 else:
-    st.info("Hoy no hay senales activas. Revisa las empresas LATENTES abajo.")
+    st.info("Hoy no hay senales activas. Revisa las LATENTES abajo.")
 
-# Empresas latentes (esperar)
 df_lat = df_ops[df_ops['Lado'] == 'LATENTE'].copy()
 if not df_lat.empty:
     with st.expander("Empresas LATENTES (esperar senal, NO comprar aun)"):
         st.dataframe(
             df_lat[['Ticker', 'Precio Spot', 'Condicion 3: Zona Diario', 'Estrategia Cardona']],
-            use_container_width=True,
-            hide_index=True
+            use_container_width=True, hide_index=True
         )
 
 st.divider()
 
 # ==========================================
-# PANEL LATERAL
+# SIDEBAR: CONTROL + SIMULADOR
 # ==========================================
 
 st.sidebar.header("Panel de Control")
-ticker_sel = st.sidebar.selectbox("Elige empresa para la grafica", df['Ticker'].tolist())
-
-estr_filt = st.sidebar.multiselect(
-    "Estrategia Cardona",
-    options=sorted(df['Estrategia Cardona'].unique().tolist()),
-    default=sorted(df['Estrategia Cardona'].unique().tolist())
-)
-
-tend_filt = st.sidebar.multiselect(
-    "Tendencia 1H",
-    options=['Alcista', 'Bajista'],
-    default=['Alcista', 'Bajista']
-)
-
-val_filt = st.sidebar.multiselect(
-    "Hora de entrada (Validacion Humana)",
-    options=sorted(df['Validación Humana'].unique().tolist()),
-    default=sorted(df['Validación Humana'].unique().tolist())
-)
+ticker_sel = st.sidebar.selectbox("Empresa para grafica", df['Ticker'].tolist())
 
 st.sidebar.markdown("---")
-st.sidebar.header("Reglas OTM (Metodo Cardona)")
-st.sidebar.markdown(
-    "- Compra SOLO opciones FUERA del dinero (OTM).\n"
-    "- CALL: strike ARRIBA del precio. PUT: strike ABAJO.\n"
-    "- Vencimiento: viernes mas cercano.\n"
-    "- PUT 1 entra a las 10:00. El resto desde las 11:00.\n"
-    "- Hanger: cerca del cierre (4:00 PM).\n"
-    "- NUNCA compres sin vela FORMADA y confirmada."
-)
+st.sidebar.header("SIMULADOR - AUTOPILOTO")
+
+if ws_sim is None:
+    st.sidebar.warning("Simulador sin conexion de escritura. Agrega GOOGLE_CREDENTIALS en Secrets de Streamlit Cloud.")
+
+abiertas = [f for f in filas_sim if str(f.get('Estado', '')) == 'ABIERTA']
+cerradas = [f for f in filas_sim if str(f.get('Estado', '')) == 'CERRADA']
+
+pnl_total = 0.0
+wins = 0
+for f in cerradas:
+    try:
+        g = float(f.get('Ganancia $', 0) or 0)
+        pnl_total += g
+        if g > 0:
+            wins += 1
+    except Exception:
+        pass
+win_rate = round(wins / len(cerradas) * 100.0, 1) if cerradas else 0.0
+
+m1, m2 = st.sidebar.columns(2)
+m1.metric("P&L TOTAL", f"{pnl_total:+.2f}")
+m2.metric("ACIERTOS", f"{win_rate}%")
+m3, m4 = st.sidebar.columns(2)
+m3.metric("ABIERTAS", len(abiertas))
+m4.metric("CERRADAS", len(cerradas))
+
+# ----- Senales de hoy con boton COMPRAR -----
+st.sidebar.subheader("Senales de hoy")
+tickers_con_posicion = set(str(f.get('Simbolo', '')) for f in abiertas)
+
+senales = df_ops[df_ops['Lado'] != 'LATENTE']
+if ws_sim is not None and not senales.empty:
+    for _, s in senales.iterrows():
+        tk = s['Ticker']
+        if tk in tickers_con_posicion:
+            continue
+        ask_v = s['Ask Num']
+        strike_v = s['Strike OTM']
+        if pd.isna(ask_v) or ask_v <= 0 or pd.isna(strike_v):
+            continue
+        costo = ask_v * 100.0
+        if costo > MAX_INVERSION:
+            continue
+        qty = 2 if costo <= 15.0 else 1
+        st.sidebar.caption(tk + " " + s['Lado'] + " | Strike " + str(strike_v) + " | Ask " + f"{ask_v:.2f}" + " | " + str(qty) + " contrato(s)")
+        if st.sidebar.button("COMPRAR " + tk, key="buy_" + tk):
+            ahora = datetime.now(ZONA_NY)
+            venc = str(s['Vencimiento'])
+            try:
+                dte = (datetime.strptime(venc, '%Y-%m-%d').date() - ahora.date()).days
+            except Exception:
+                dte = 0
+            f_prog = viernes_venta_prog(ahora.date())
+            be = round(strike_v + ask_v, 2) if s['Lado'] == 'CALL' else round(strike_v - ask_v, 2)
+            lotes = ['lote meta +100%', 'lote viernes'] if qty == 2 else ['lote unico: meta o viernes']
+            for nota_lote in lotes:
+                filas_sim.append({
+                    'NOM': 'MANUAL', 'Fecha': ahora.strftime('%Y-%m-%d'), 'Hora': ahora.strftime('%H:%M:%S'),
+                    'Simbolo': tk, 'Strike': strike_v, 'F. Exp': venc, 'Call/Put': s['Lado'],
+                    'Cantidad': 1, 'Precio Compra': ask_v, 'Total Inv.': round(costo, 2),
+                    'Precio Limit': round(ask_v * META_GAIN, 2), 'Fecha Venta Prog': f_prog.strftime('%Y-%m-%d'),
+                    'Fecha Venta': '', 'Precio Venta': '', 'Total Venta': '', 'Ganancia $': '', 'Ganancia %': '',
+                    'Bid Actual': '', 'Estrategia': s['Estrategia Cardona'], 'Estado': 'ABIERTA',
+                    'Notas': nota_lote + ' | compra manual', 'VI': '', 'DTE': dte, 'Break Even': be,
+                    'Max Loss': round(costo + COMISION, 2)
+                })
+            if escribir_sim(ws_sim, filas_sim):
+                st.sidebar.success("Compra MANUAL registrada: " + tk)
+                st.rerun()
+elif ws_sim is not None:
+    st.sidebar.caption("Sin senales comprables hoy (regla de $30 o ya con posicion).")
+
+# ----- Posiciones abiertas con boton VENDER -----
+st.sidebar.subheader("Posiciones abiertas")
+if ws_sim is not None and abiertas:
+    for i, f in enumerate(filas_sim):
+        if str(f.get('Estado', '')) != 'ABIERTA':
+            continue
+        g = gan_pct_viva(f)
+        st.sidebar.caption(
+            str(f.get('Simbolo')) + " " + str(f.get('Call/Put')) + " | Strike " + str(f.get('Strike')) +
+            " | compro " + str(f.get('Precio Compra')) + " | Bid " + str(f.get('Bid Actual', '-')) +
+            " | " + f"{g:+.0f}%" + " | venta " + str(f.get('Fecha Venta Prog'))
+        )
+        if st.sidebar.button("VENDER " + str(f.get('Simbolo')) + " " + str(f.get('Strike')), key="sell_" + str(i)):
+            bid = bid_actual_posicion(str(f.get('Simbolo')), str(f.get('F. Exp')), f.get('Strike'), str(f.get('Call/Put')))
+            if bid <= 0:
+                st.sidebar.error("No hay Bid disponible ahora; intenta en horario de mercado.")
+            else:
+                cerrar_fila(f, bid, datetime.now(ZONA_NY).strftime('%Y-%m-%d'), 'venta manual')
+                if escribir_sim(ws_sim, filas_sim):
+                    st.sidebar.success("Venta MANUAL registrada.")
+                    st.rerun()
+else:
+    st.sidebar.caption("Sin posiciones abiertas.")
 
 st.sidebar.markdown("---")
-st.sidebar.header("Actualizacion manual")
-
+st.sidebar.header("Actualizacion")
 if st.sidebar.button("Lanzar escaneo ahora"):
     try:
         token = st.secrets["GH_TOKEN"]
@@ -461,24 +708,18 @@ if st.sidebar.button("Lanzar escaneo ahora"):
         urllib.request.urlopen(req)
         st.session_state['esperando'] = True
         st.session_state['hora_lanzamiento'] = datetime.now(ZONA_NY).strftime('%Y-%m-%d %H:%M:%S')
-        st.sidebar.success("Escaneo lanzado. Te aviso cuando lleguen los datos.")
+        st.sidebar.success("Escaneo lanzado.")
         st.rerun()
     except Exception as e:
         st.sidebar.error("No se pudo lanzar el escaneo: " + str(e))
 
-if st.sidebar.button("Recargar datos del Sheet"):
+if st.sidebar.button("Recargar datos"):
     cargar_datos.clear()
     st.rerun()
 
 # ==========================================
-# DETALLE Y TARJETA OTM DE LA EMPRESA ELEGIDA
+# DETALLE Y TARJETA OTM
 # ==========================================
-
-df_f = df[
-    df['Estrategia Cardona'].isin(estr_filt) &
-    df['Tendencia 1H'].isin(tend_filt) &
-    df['Validación Humana'].isin(val_filt)
-]
 
 fila = df_ops[df_ops['Ticker'] == ticker_sel]
 if not fila.empty:
@@ -490,7 +731,6 @@ if not fila.empty:
     c.write("**Cond 3:** " + str(r['Condicion 3: Zona Diario']))
     d.write("**Validacion:** " + str(r['Validación Humana']))
 
-    # Tarjeta OTM
     st.markdown("**Tarjeta OTM de " + ticker_sel + "**")
     t1, t2 = st.columns(2)
     with t1:
@@ -511,21 +751,15 @@ if not fila.empty:
             st.warning(CRUZ + " PUT no viable")
 
     if r['Lado'] == 'CALL':
-        st.success(
-            FUEGO + " RECOMENDACION CARDONA: comprar CALL strike " + str(r['Strike Call OTM']) +
-            " | Ask $" + str(r['Call Ask ($)']) +
-            " | Vence " + str(r['Vencimiento']) +
-            " | Entrada: " + str(r['Validación Humana'])
-        )
+        st.success(FUEGO + " RECOMENDACION CARDONA: comprar CALL strike " + str(r['Strike Call OTM']) +
+                   " | Ask $" + str(r['Call Ask ($)']) + " | Vence " + str(r['Vencimiento']) +
+                   " | Entrada: " + str(r['Validación Humana']))
     elif r['Lado'] == 'PUT':
-        st.success(
-            FUEGO + " RECOMENDACION CARDONA: comprar PUT strike " + str(r['Strike Put OTM']) +
-            " | Ask $" + str(r['Put Ask ($)']) +
-            " | Vence " + str(r['Vencimiento']) +
-            " | Entrada: " + str(r['Validación Humana'])
-        )
+        st.success(FUEGO + " RECOMENDACION CARDONA: comprar PUT strike " + str(r['Strike Put OTM']) +
+                   " | Ask $" + str(r['Put Ask ($)']) + " | Vence " + str(r['Vencimiento']) +
+                   " | Entrada: " + str(r['Validación Humana']))
     else:
-        st.warning("Sin senal viable hoy: LATENTE. Espera a que se forme la estrategia antes de comprar opciones.")
+        st.warning("Sin senal viable hoy: LATENTE. Espera a que se forme la estrategia.")
 
 # ==========================================
 # GRAFICOS Y VERIFICACION CON FUEGO
@@ -535,7 +769,7 @@ df1h = serie(ticker_sel, "1h", "60d")
 df1d = serie(ticker_sel, "1d", "1y")
 
 st.subheader("Verificacion de Estrategias (Metodo Cardona)")
-st.caption(FUEGO + " = estrategia con TODOS los requisitos cumplidos, lista para verificar en el grafico.")
+st.caption(FUEGO + " = estrategia con TODOS los requisitos cumplidos.")
 
 for e in requisitos_cardona(df1h, df1d):
     cumplidos = sum(1 for _, ok in e['checks'] if ok)
@@ -557,13 +791,8 @@ for e in requisitos_cardona(df1h, df1d):
 df1h['SMA40'] = df1h['Close'].rolling(40).mean()
 fig1 = go.Figure()
 fig1.add_trace(go.Candlestick(
-    x=df1h.index,
-    open=df1h['Open'],
-    high=df1h['High'],
-    low=df1h['Low'],
-    close=df1h['Close'],
-    name=ticker_sel
-))
+    x=df1h.index, open=df1h['Open'], high=df1h['High'],
+    low=df1h['Low'], close=df1h['Close'], name=ticker_sel))
 fig1.add_trace(go.Scatter(x=df1h.index, y=df1h['SMA40'], name='SMA 40', line=dict(color='orange', width=2)))
 fig1.update_layout(title=ticker_sel + " - Velas 1H + SMA 40", xaxis_rangeslider_visible=False, height=420)
 
@@ -584,22 +813,73 @@ with g2:
 st.divider()
 
 # ==========================================
-# TABLA RADAR DE ACTIVOS
+# RADAR DE ACTIVOS
 # ==========================================
 
 st.subheader("Radar de Activos")
-df_show = df_f.copy()
+df_show = df.copy()
 df_show['Tendencia 1H'] = df_show['Tendencia 1H'].map(
     lambda x: ALTA + " Alcista" if x == 'Alcista' else BAJA + " Bajista"
 )
-
 cols = [
     'Ticker', 'Precio Spot', 'Tendencia 1H', 'SMA 40 (1H)', 'Estrategia Cardona',
     'Validación Humana', 'Call Ask ($)', 'Call Estado', 'Put Ask ($)', 'Put Estado'
 ]
-
 st.dataframe(
     df_show[[c for c in cols if c in df_show.columns]],
-    use_container_width=True,
-    hide_index=True
+    use_container_width=True, hide_index=True
 )
+
+st.divider()
+
+# ==========================================
+# HISTORIAL + INFORME SEMANAL IA
+# ==========================================
+
+st.subheader("Historial de operaciones (SIMULADOR)")
+if cerradas:
+    hist = pd.DataFrame(cerradas)
+    hist_show = hist[[c for c in ['Fecha', 'Simbolo', 'Call/Put', 'Strike', 'Precio Compra', 'Precio Venta', 'Ganancia $', 'Ganancia %', 'Estrategia', 'Notas'] if c in hist.columns]]
+    st.dataframe(hist_show, use_container_width=True, hide_index=True)
+else:
+    st.caption("Aun no hay operaciones cerradas. El Autopiloto y tus compras manuales apareceran aqui.")
+
+st.subheader("Informe semanal de la IA (aprendizaje)")
+if st.button("Generar informe semanal con IA"):
+    if not KEY_G:
+        st.warning("Falta GEMINI_API_KEY en Secrets.")
+    elif not cerradas:
+        st.info("Aun no hay operaciones cerradas para analizar.")
+    else:
+        with st.spinner("Gemini analizando el historial..."):
+            ws_ia = abrir_informe_ia(sh_sim)
+            lecciones_previas = ''
+            if ws_ia is not None:
+                try:
+                    regs = ws_ia.get_all_records()
+                    lecciones_previas = " | ".join([str(x.get('Lecciones', '')) for x in regs][-5:])
+                except Exception:
+                    lecciones_previas = ''
+            ia = informe_gemini(cerradas, lecciones_previas, KEY_G)
+        if ia:
+            st.markdown("**Resumen:** " + str(ia.get('resumen', '')))
+            st.markdown("**Win rate por estrategia:**")
+            st.json(ia.get('win_rate_por_estrategia', {}))
+            st.markdown("**Lecciones (memoria del sistema):**")
+            for e in ia.get('lecciones', []):
+                st.markdown("- " + str(e))
+            st.markdown("**Recomendaciones para la proxima semana:**")
+            for e in ia.get('recomendaciones', []):
+                st.markdown("- " + str(e))
+            if ws_ia is not None:
+                try:
+                    ws_ia.append_row([
+                        datetime.now(ZONA_NY).strftime('%Y-%m-%d %H:%M'),
+                        str(ia.get('resumen', '')),
+                        " | ".join([str(x) for x in ia.get('lecciones', [])]),
+                        " | ".join([str(x) for x in ia.get('recomendaciones', [])])
+                    ])
+                except Exception:
+                    pass
+        else:
+            st.error("Gemini no respondio. Revisa la clave o intenta mas tarde.")
