@@ -53,7 +53,7 @@ SIM_HEADERS = [
 ]
 
 # ==========================================
-# FUNCIONES DE ANALISIS TECNICO (sin cambios v4)
+# FUNCIONES DE ANALISIS TECNICO
 # ==========================================
 
 def obtener_datos(ticker):
@@ -151,7 +151,7 @@ def detectar_canal_bajista(datos, num_velas=10):
     return False, None
 
 # ==========================================
-# OPCIONES: ahora trae Ask, Bid y Volatilidad
+# OPCIONES: Ask, Bid y Volatilidad
 # ==========================================
 
 def leer_fila_opcion(row):
@@ -255,7 +255,7 @@ def bid_de_cadena(chain, strike, lado):
         return 0.0
 
 # ==========================================
-# ESTRATEGIAS (sin cambios v4)
+# ESTRATEGIAS CALL
 # ==========================================
 
 def estrategia_pm40(datos_diarios, datos_horarios):
@@ -364,6 +364,10 @@ def estrategia_primer_gap(datos_diarios, datos_horarios):
         return False
     return True
 
+# ==========================================
+# ESTRATEGIAS PUT
+# ==========================================
+
 def estrategia_primera_vela_roja(datos_30m, ahora_ny):
     v1 = primera_vela_del_dia(datos_30m, ahora_ny)
     if v1 is None:
@@ -422,7 +426,7 @@ def estrategia_hanger_diario(datos_diarios):
 # ==========================================
 
 def viernes_venta_prog(fecha_ny):
-    """Lun-mie -> viernes de esa semana; jue-vie (o fin de semana) -> viernes siguiente"""
+    """Lun-mie -> viernes de esa semana; jue-vie o fin de semana -> viernes siguiente"""
     wd = fecha_ny.weekday()
     if wd <= 2:
         delta = 4 - wd
@@ -478,7 +482,7 @@ def cerrar_fila(row, bid, hoy_str, nota):
     row['Notas'] = str(row.get('Notas', '')) + ' | ' + nota
 
 # ==========================================
-# ANALISIS PRINCIPAL (radar, con Bid nuevo)
+# ANALISIS PRINCIPAL (radar con Bid nuevo)
 # ==========================================
 
 def analizar_activo(ticker, ahora_ny):
@@ -630,193 +634,3 @@ def abrir_simulador(sh):
         ws.append_row(SIM_HEADERS)
     return ws
 
-def leer_simulador(ws):
-    try:
-        filas = ws.get_all_records()
-        return [dict(f) for f in filas]
-    except Exception:
-        return []
-
-def escribir_simulador(ws, filas):
-    try:
-        ws.clear()
-        ws.append_row(SIM_HEADERS)
-        for f in filas:
-            ws.append_row([str(f.get(h, '')) for h in SIM_HEADERS])
-        print("Simulador guardado: " + str(len(filas)) + " filas")
-    except Exception as e:
-        print("Error guardando simulador: " + str(e))
-
-# ==========================================
-# MAIN (radar + autopiloto)
-# ==========================================
-
-def main():
-    ahora_ny = datetime.now(NY_TZ)
-    print("=" * 60)
-    print("METODO CARDONA - RADAR + AUTOPILOTO v5")
-    print("Fecha: " + ahora_ny.strftime('%Y-%m-%d %H:%M:%S') + " (NY)")
-    print("=" * 60)
-
-    resultados = []
-
-    # Leer simulador al inicio
-    sh0 = gc.open_by_key(SPREADSHEET_ID)
-    ws_sim = abrir_simulador(sh0)
-    filas_sim = leer_simulador(ws_sim)
-    pausadas = estrategias_pausadas(filas_sim)
-    if pausadas:
-        print("Estrategias en pausa (aprendizaje): " + ", ".join(pausadas))
-
-    abiertas = [f for f in filas_sim if str(f.get('Estado', '')) == 'ABIERTA']
-    tickers_con_posicion = set(str(f.get('Simbolo', '')) for f in abiertas)
-    contratos_abiertos = sum(int(float(f.get('Cantidad', 1) or 1)) for f in abiertas)
-
-    cadenas_cache = {}
-
-    for ticker in TICKERS:
-        r = analizar_activo(ticker, ahora_ny)
-        if r is None:
-            continue
-        resultados.append(r)
-
-        # ---------- VENTAS: revisar posiciones de este ticker ----------
-        for f in filas_sim:
-            if str(f.get('Estado', '')) != 'ABIERTA' or str(f.get('Simbolo', '')) != ticker:
-                continue
-            exp = str(f.get('F. Exp', ''))
-            lado = str(f.get('Call/Put', ''))
-            clave = (ticker, exp)
-            if clave not in cadenas_cache:
-                try:
-                    cadenas_cache[clave] = yf.Ticker(ticker).option_chain(exp)
-                except Exception:
-                    cadenas_cache[clave] = None
-            chain = cadenas_cache[clave]
-            if chain is None:
-                continue
-            bid = bid_de_cadena(chain, f.get('Strike'), lado)
-            f['Bid Actual'] = bid
-            if bid <= 0:
-                continue
-            try:
-                limit = float(f.get('Precio Limit', 0) or 0)
-            except Exception:
-                limit = 0.0
-            notas = str(f.get('Notas', ''))
-            hoy_str = ahora_ny.strftime('%Y-%m-%d')
-            try:
-                f_prog = datetime.strptime(str(f.get('Fecha Venta Prog', '')), '%Y-%m-%d').date()
-            except Exception:
-                f_prog = ahora_ny.date()
-
-            if limit > 0 and bid >= limit:
-                cerrar_fila(f, bid, hoy_str, 'venta auto +100%')
-                print("AUTOPILOTO VENTA +100%: " + ticker + " " + lado)
-            elif ahora_ny.date() >= f_prog:
-                cerrar_fila(f, bid, hoy_str, 'venta programada viernes')
-                print("AUTOPILOTO VENTA VIERNES: " + ticker + " " + lado)
-
-        # ---------- COMPRAS: senal viable + reglas ----------
-        if r['Call Estado'] == 'VIABLE':
-            lado, strike, ask, bid0, iv = 'CALL', r['Strike Call OTM'], r['Call Ask ($)'], r['Call Bid ($)'], r['call_iv'] if 'call_iv' in r.get('_opc', {}) else r['_opc'].get('call_iv', 0)
-        elif r['Put Estado'] == 'VIABLE':
-            lado, strike, ask, bid0, iv = 'PUT', r['Strike Put OTM'], r['Put Ask ($)'], r['Put Bid ($)'], r['_opc'].get('put_iv', 0)
-        else:
-            lado = None
-
-        if lado is None:
-            time.sleep(1)
-            continue
-        if ticker in tickers_con_posicion:
-            time.sleep(1)
-            continue
-        if str(r['Estrategia Cardona']) in pausadas:
-            print("AUTOPILOTO: estrategia en pausa para " + ticker)
-            time.sleep(1)
-            continue
-        if not hora_entrada_ok(str(r['Estrategia Cardona']), lado, ahora_ny):
-            time.sleep(1)
-            continue
-        if not isinstance(ask, (int, float)) or ask <= 0 or strike == 'N/A':
-            time.sleep(1)
-            continue
-
-        costo = ask * 100.0
-        if costo <= 15.0:
-            qty = 2
-        elif costo <= MAX_INVERSION:
-            qty = 1
-        else:
-            print("AUTOPILOTO: " + ticker + " muy cara (" + str(round(costo, 2)) + "), no compra")
-            time.sleep(1)
-            continue
-
-        if contratos_abiertos + qty > MAX_ABIERTAS:
-            print("AUTOPILOTO: limite de 5 contratos alcanzado")
-            time.sleep(1)
-            continue
-
-        venc = r['Vencimiento']
-        try:
-            dte = (datetime.strptime(venc, '%Y-%m-%d').date() - ahora_ny.date()).days
-        except Exception:
-            dte = 0
-        f_prog = viernes_venta_prog(ahora_ny.date())
-        be = round(strike + ask, 2) if lado == 'CALL' else round(strike - ask, 2)
-
-        lotes = []
-        if qty == 2:
-            lotes = [('lote meta +100%',), ('lote viernes',)]
-        else:
-            lotes = [('lote unico: meta o viernes',)]
-
-        for (nota_lote,) in lotes:
-            filas_sim.append({
-                'NOM': 'AUTOPILOTO',
-                'Fecha': ahora_ny.strftime('%Y-%m-%d'),
-                'Hora': ahora_ny.strftime('%H:%M:%S'),
-                'Simbolo': ticker,
-                'Strike': strike,
-                'F. Exp': venc,
-                'Call/Put': lado,
-                'Cantidad': 1,
-                'Precio Compra': ask,
-                'Total Inv.': round(costo, 2),
-                'Precio Limit': round(ask * META_GAIN, 2),
-                'Fecha Venta Prog': f_prog.strftime('%Y-%m-%d'),
-                'Fecha Venta': '',
-                'Precio Venta': '',
-                'Total Venta': '',
-                'Ganancia $': '',
-                'Ganancia %': '',
-                'Bid Actual': bid0,
-                'Estrategia': r['Estrategia Cardona'],
-                'Estado': 'ABIERTA',
-                'Notas': nota_lote,
-                'VI': iv,
-                'DTE': dte,
-                'Break Even': be,
-                'Max Loss': round(costo + COMISION, 2)
-            })
-
-        contratos_abiertos += qty
-        tickers_con_posicion.add(ticker)
-        print("AUTOPILOTO COMPRA: " + ticker + " " + lado + " strike " + str(strike) + " x" + str(qty) + " a " + str(ask))
-
-        time.sleep(1)
-
-    # Guardar radar y simulador
-    sh = guardar_en_sheet(resultados)
-    if sh is not None:
-        ws_sim = abrir_simulador(sh)
-        escribir_simulador(ws_sim, filas_sim)
-
-    print("=" * 60)
-    print("RESUMEN:")
-    for r in resultados:
-        print(r['Ticker'] + " | " + r['Estrategia Cardona'] + " | CALL: " + r['Call Estado'] + " | PUT: " + r['Put Estado'])
-    print("=" * 60)
-
-if __name__ == '__main__':
-    main()
