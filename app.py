@@ -80,7 +80,7 @@ def obtener_key_gemini():
 
 def abrir_sim(ws_ok):
     if ws_ok is None:
-        return None
+        return None, None
     try:
         sh = ws_ok.open_by_key(SPREADSHEET_ID)
         try:
