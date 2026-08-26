@@ -1,22 +1,13 @@
 name: Actualizar Radar Trading
 
-# ==========================================
-# HORARIO DE ESCANEOS (convertido a UTC)
-# Cubre todo el ano (verano e invierno de NY)
-# ==========================================
 on:
   schedule:
-    # 9:31 NY (apertura de bolsa)
     - cron: '31 13 * * 1-5'
-    # 10:01 a 16:01 NY, cada hora (velas formadas)
     - cron: '1 14-20 * * 1-5'
-    # 15:58 NY (cierre, Hanger)
     - cron: '58 19 * * 1-5'
     - cron: '58 20 * * 1-5'
-  # Boton manual desde la app y desde GitHub
   workflow_dispatch:
 
-# Evita dos escaneos al mismo tiempo escribiendo el Sheet a la vez
 concurrency:
   group: radar-francotirador
   cancel-in-progress: false
@@ -25,17 +16,15 @@ jobs:
   maquina_1:
     runs-on: ubuntu-latest
     steps:
-      - name: Clonar repositorio
-        uses: actions/checkout@v4
-      - name: Configurar Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      - name: Instalar dependencias
-        run: pip install yfinance pandas numpy gspread google-auth tzdata
-      - name: Ejecutar script de actualizacion
+      - run: pip install yfinance pandas numpy gspread google-auth tzdata requests
+      - name: Ejecutar
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PYTHONIOENCODING: utf-8
         run: python main.py
 
@@ -44,17 +33,15 @@ jobs:
     if: ${{ failure() }}
     runs-on: ubuntu-22.04
     steps:
-      - name: Clonar repositorio
-        uses: actions/checkout@v4
-      - name: Configurar Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      - name: Instalar dependencias
-        run: pip install yfinance pandas numpy gspread google-auth tzdata
-      - name: Ejecutar script de actualizacion
+      - run: pip install yfinance pandas numpy gspread google-auth tzdata requests
+      - name: Ejecutar
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PYTHONIOENCODING: utf-8
         run: python main.py
 
@@ -63,16 +50,14 @@ jobs:
     if: ${{ failure() }}
     runs-on: windows-latest
     steps:
-      - name: Clonar repositorio
-        uses: actions/checkout@v4
-      - name: Configurar Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      - name: Instalar dependencias
-        run: pip install yfinance pandas numpy gspread google-auth tzdata
-      - name: Ejecutar script de actualizacion
+      - run: pip install yfinance pandas numpy gspread google-auth tzdata requests
+      - name: Ejecutar
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PYTHONIOENCODING: utf-8
         run: python main.py
