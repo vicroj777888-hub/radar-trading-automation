@@ -1,8 +1,7 @@
 # ==========================================
 # RADAR DE FRANCOTIRADOR - DSS TRADING
-# app.py - VERSION FINAL v5 (con SIMULADOR + IA)
+# app.py - VERSION v5.1 (diagnostico de Secrets + width stretch)
 # 25 de agosto de 2026
-# Sin emojis literales: constantes Unicode (copiado seguro)
 # ==========================================
 
 import streamlit as st
@@ -54,11 +53,14 @@ if 'aviso_listo' not in st.session_state:
     st.session_state['aviso_listo'] = False
 
 # ==========================================
-# CONEXIONES (Sheet con escritura + Gemini)
+# CONEXIONES CON DIAGNOSTICO VISIBLE
 # ==========================================
+
+CRED_ERROR = ''
 
 @st.cache_resource
 def conectar_sheet():
+    global CRED_ERROR
     try:
         info = json.loads(st.secrets['GOOGLE_CREDENTIALS'])
         creds = Credentials.from_service_account_info(info, scopes=[
@@ -66,7 +68,8 @@ def conectar_sheet():
             'https://www.googleapis.com/auth/drive'
         ])
         return gspread.authorize(creds)
-    except Exception:
+    except Exception as e:
+        CRED_ERROR = str(e)
         return None
 
 def obtener_key_gemini():
@@ -569,7 +572,7 @@ if not df_viables.empty:
         'Costo Formato': 'Costo por contrato ($)',
         'Dist Formato': 'Distancia OTM'
     })
-    st.dataframe(tabla_viables, use_container_width=True, hide_index=True)
+    st.dataframe(tabla_viables, width='stretch', hide_index=True)
     st.caption("Costo por contrato = Ask x 100. Solo compra con vela FORMADA en el horario de Validacion Humana.")
 else:
     st.info("Hoy no hay senales activas. Revisa las LATENTES abajo.")
@@ -579,7 +582,7 @@ if not df_lat.empty:
     with st.expander("Empresas LATENTES (esperar senal, NO comprar aun)"):
         st.dataframe(
             df_lat[['Ticker', 'Precio Spot', 'Condicion 3: Zona Diario', 'Estrategia Cardona']],
-            use_container_width=True, hide_index=True
+            width='stretch', hide_index=True
         )
 
 st.divider()
@@ -595,7 +598,7 @@ st.sidebar.markdown("---")
 st.sidebar.header("SIMULADOR - AUTOPILOTO")
 
 if ws_sim is None:
-    st.sidebar.warning("Simulador sin conexion de escritura. Agrega GOOGLE_CREDENTIALS en Secrets de Streamlit Cloud.")
+    st.sidebar.warning("Simulador sin conexion de escritura. Causa: " + (CRED_ERROR or "agrega GOOGLE_CREDENTIALS en Secrets de Streamlit Cloud."))
 
 abiertas = [f for f in filas_sim if str(f.get('Estado', '')) == 'ABIERTA']
 cerradas = [f for f in filas_sim if str(f.get('Estado', '')) == 'CERRADA']
@@ -619,7 +622,6 @@ m3, m4 = st.sidebar.columns(2)
 m3.metric("ABIERTAS", len(abiertas))
 m4.metric("CERRADAS", len(cerradas))
 
-# ----- Senales de hoy con boton COMPRAR -----
 st.sidebar.subheader("Senales de hoy")
 tickers_con_posicion = set(str(f.get('Simbolo', '')) for f in abiertas)
 
@@ -665,7 +667,6 @@ if ws_sim is not None and not senales.empty:
 elif ws_sim is not None:
     st.sidebar.caption("Sin senales comprables hoy (regla de $30 o ya con posicion).")
 
-# ----- Posiciones abiertas con boton VENDER -----
 st.sidebar.subheader("Posiciones abiertas")
 if ws_sim is not None and abiertas:
     for i, f in enumerate(filas_sim):
@@ -806,9 +807,9 @@ fig2.update_layout(title=ticker_sel + " - Diario: Piso 100/200", height=420)
 
 g1, g2 = st.columns(2)
 with g1:
-    st.plotly_chart(fig1, use_container_width=True)
+    st.plotly_chart(fig1, width='stretch')
 with g2:
-    st.plotly_chart(fig2, use_container_width=True)
+    st.plotly_chart(fig2, width='stretch')
 
 st.divider()
 
@@ -827,7 +828,7 @@ cols = [
 ]
 st.dataframe(
     df_show[[c for c in cols if c in df_show.columns]],
-    use_container_width=True, hide_index=True
+    width='stretch', hide_index=True
 )
 
 st.divider()
@@ -840,9 +841,9 @@ st.subheader("Historial de operaciones (SIMULADOR)")
 if cerradas:
     hist = pd.DataFrame(cerradas)
     hist_show = hist[[c for c in ['Fecha', 'Simbolo', 'Call/Put', 'Strike', 'Precio Compra', 'Precio Venta', 'Ganancia $', 'Ganancia %', 'Estrategia', 'Notas'] if c in hist.columns]]
-    st.dataframe(hist_show, use_container_width=True, hide_index=True)
+    st.dataframe(hist_show, width='stretch', hide_index=True)
 else:
-    st.caption("Aun no hay operaciones cerradas. El Autopiloto y tus compras manuales apareceran aqui.")
+    st.caption("Aun no hay operaciones cerradas.")
 
 st.subheader("Informe semanal de la IA (aprendizaje)")
 if st.button("Generar informe semanal con IA"):
