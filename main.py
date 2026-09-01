@@ -1,6 +1,6 @@
 # ==========================================
-# METODO CARDONA - main.py v6 FINAL
-# Autopiloto + 4 puertas de salida + aprendizaje
+# METODO CARDONA - main.py v7
+# Auditoria de estrategias corregida segun libro y apuntes
 # Repo unico: radar-trading-automation
 # ==========================================
 
@@ -39,6 +39,9 @@ MAX_ABIERTAS = 5
 META_GAIN = 2.0
 COMISION = 0.0
 MODELOS = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-flash-latest']
+
+GROUP_ALCISTA = ["PM 40", "Caida Normal", "Caida Fuerte", "Gap al Alza",
+                 "Gap Bajista al Alza", "Piso Fuerte", "Primer Gap al Alza"]
 
 SIM_HEADERS = [
     'NOM', 'Fecha', 'Hora', 'Simbolo', 'Strike', 'F. Exp', 'Call/Put',
@@ -197,15 +200,21 @@ def bid_de_cadena(chain, strike, lado):
         return 0.0
 
 # ==========================================
-# ESTRATEGIAS
+# ESTRATEGIAS (v7 corregidas)
 # ==========================================
 
 def estrategia_pm40(dd, dh):
-    if len(dd) < 40 or len(dh) < 2: return False
-    if float(dd['SMA20'].iloc[-1]) <= float(dd['SMA40'].iloc[-1]): return False
+    """AHORA EN MARCO HORA: PM20 encima de PM40 + caida que se acerca al PM40"""
+    if len(dh) < 40 or len(dh) < 2:
+        return False
+    pm20_h = float(dh['SMA20'].iloc[-1])
+    pm40_h = float(dh['SMA40'].iloc[-1])
+    if pm20_h <= pm40_h:
+        return False
     p = float(dh['Close'].iloc[-1])
-    if p >= float(dh['Close'].iloc[-2]): return False
-    return abs(p - float(dd['SMA40'].iloc[-1])) / float(dd['SMA40'].iloc[-1]) * 100 <= 2.0
+    if p >= float(dh['Close'].iloc[-2]):
+        return False
+    return abs(p - pm40_h) / pm40_h * 100 <= 2.0
 
 def estrategia_caida(dd, dh):
     if len(dh) < 2: return False, ""
@@ -293,13 +302,26 @@ def viernes_venta_prog(f):
     delta = 4 - wd if wd <= 2 else (8 if wd == 3 else (7 if wd == 4 else (6 if wd == 5 else 5)))
     return f + timedelta(days=delta)
 
-def hora_entrada_ok(estrategia, lado, ahora):
-    if ahora.weekday() > 4: return False
+def hora_entrada_ok(lado, sc, sp, ahora):
+    """Horarios Cardona: PVR 10-11; Hanger y Primer Gap 15+; resto 11+"""
+    if ahora.weekday() > 4:
+        return False
     h = ahora.hour
-    if h < 9 or h >= 16: return False
-    if lado == 'PUT' and 'Primera Vela Roja' in estrategia: return h >= 10
-    if 'Hanger' in estrategia: return h >= 15
-    return h >= 11
+    if h < 9 or h >= 16:
+        return False
+    if lado == 'PUT':
+        otras = [s for s in sp if s != 'Primera Vela Roja']
+        if 'Primera Vela Roja' in sp and not otras:
+            return 10 <= h < 11
+        if otras:
+            if otras == ['Hanger en Diario']:
+                return h >= 15
+            return h >= 11
+        return 10 <= h < 11
+    else:
+        if sc and all(s == 'Primer Gap al Alza' for s in sc):
+            return h >= 15
+        return h >= 11
 
 def estrategias_pausadas(filas):
     stats = {}
@@ -337,7 +359,6 @@ def limpiar_json(txt):
     return txt.strip()
 
 def revision_ia(f, key):
-    """Puerta 3: Gemini decide VENDER o MANTENER el lote corredor"""
     try: compra = float(f.get('Precio Compra', 0))
     except Exception: compra = 0.0
     try: bid = float(f.get('Bid Actual', 0))
@@ -362,7 +383,7 @@ def revision_ia(f, key):
     return None, ''
 
 # ==========================================
-# ANALISIS RADAR
+# ANALISIS RADAR (v7: viabilidad por estrategia)
 # ==========================================
 
 def analizar_activo(ticker, ahora):
@@ -371,24 +392,6 @@ def analizar_activo(ticker, ahora):
     if dd is None or dh is None:
         return None
     precio = float(dh['Close'].iloc[-1])
-    sc, sp = [], []
-    if estrategia_pm40(dd, dh): sc.append("PM 40")
-    ca, ti = estrategia_caida(dd, dh)
-    if ca: sc.append(ti)
-    if estrategia_ruptura_canal(dh): sc.append("Ruptura Canal Bajista")
-    if estrategia_gap_al_alza(dd, dh): sc.append("Gap al Alza")
-    if estrategia_gap_bajista_al_alza(dd, dh): sc.append("Gap Bajista al Alza")
-    if estrategia_piso_fuerte(dd, dh): sc.append("Piso Fuerte")
-    if estrategia_primer_gap(dd, dh): sc.append("Primer Gap al Alza")
-    if estrategia_primera_vela_roja(d30, ahora): sp.append("Primera Vela Roja")
-    if estrategia_ruptura_piso_gap(dh): sp.append("Ruptura Piso del Gap")
-    if estrategia_modelo_4_pasos(dh): sp.append("Modelo 4 Pasos")
-    if estrategia_hanger_diario(dd): sp.append("Hanger en Diario")
-
-    if sc and not sp: epp = sc[0]
-    elif sp and not sc: epp = sp[0]
-    elif sc and sp: epp = sc[0] + " + " + sp[0]
-    else: epp = "Sin Estrategia Clara"
 
     sma40 = float(dh['SMA40'].iloc[-1]) if len(dh) >= 40 else precio
     tendencia = "Alcista" if precio > sma40 else "Bajista"
@@ -396,6 +399,46 @@ def analizar_activo(ticker, ahora):
     s100 = float(dd['SMA100'].iloc[-1]); s200 = float(dd['SMA200'].iloc[-1])
     en_piso = (abs(precio - s100) / s100 <= 0.02) or (abs(precio - s200) / s200 <= 0.02)
     zona = "En Piso Fuerte" if en_piso else "Fuera de Piso"
+    canal_h, _ = detectar_canal_bajista(dh)
+
+    sc, sp = [], []
+    if estrategia_pm40(dd, dh): sc.append("PM 40")
+    ca, ti = estrategia_caida(dd, dh)
+    if ca: sc.append(ti)
+    if estrategia_ruptura_canal(dh): sc.append("Ruptura Canal Bajista")
+    if estrategia_gap_al_alza(dd, dh) and not canal_h: sc.append("Gap al Alza")
+    if estrategia_gap_bajista_al_alza(dd, dh): sc.append("Gap Bajista al Alza")
+    if estrategia_piso_fuerte(dd, dh): sc.append("Piso Fuerte")
+    if estrategia_primer_gap(dd, dh): sc.append("Primer Gap al Alza")
+
+    pvr_fuego = estrategia_primera_vela_roja(d30, ahora)
+    if pvr_fuego and not en_piso: sp.append("Primera Vela Roja")
+    if estrategia_ruptura_piso_gap(dh): sp.append("Ruptura Piso del Gap")
+    if estrategia_modelo_4_pasos(dh): sp.append("Modelo 4 Pasos")
+    if estrategia_hanger_diario(dd) and not en_piso: sp.append("Hanger en Diario")
+
+    if sc and not sp: epp = sc[0]
+    elif sp and not sc: epp = sp[0]
+    elif sc and sp: epp = sc[0] + " + " + sp[0]
+    else: epp = "Sin Estrategia Clara"
+
+    # ---- Viabilidad v7 ----
+    call_viable = ("Ruptura Canal Bajista" in sc) or \
+                  (any(s in GROUP_ALCISTA for s in sc) and tendencia == "Alcista")
+    pvr_valid = "Primera Vela Roja" in sp
+    put_viable = pvr_valid or any(s in sp for s in ["Ruptura Piso del Gap", "Modelo 4 Pasos", "Hanger en Diario"])
+
+    # ---- Lado sugerido: PVR manda PUT 10-11; si chocan, tendencia decide ----
+    if pvr_valid and 10 <= ahora.hour < 11:
+        lado_sel = 'PUT'
+    elif call_viable and put_viable:
+        lado_sel = 'CALL' if tendencia == "Alcista" else 'PUT'
+    elif call_viable:
+        lado_sel = 'CALL'
+    elif put_viable:
+        lado_sel = 'PUT'
+    else:
+        lado_sel = 'NINGUNO'
 
     if "Primera Vela Roja" in epp: val = "10:00 - Entrada unica"
     elif ahora.hour >= 15 and ahora.minute >= 55: val = "15:58 - Cerca del cierre"
@@ -421,11 +464,14 @@ def analizar_activo(ticker, ahora):
         'Strike Call OTM': opc['strike_call'],
         'Call Ask ($)': opc['call_ask'],
         'Call Bid ($)': opc['call_bid'],
-        'Call Estado': "VIABLE" if sc and tendencia == "Alcista" else "NO VIABLE",
+        'Call Estado': "VIABLE" if call_viable else "NO VIABLE",
         'Strike Put OTM': opc['strike_put'],
         'Put Ask ($)': opc['put_ask'],
         'Put Bid ($)': opc['put_bid'],
-        'Put Estado': "VIABLE" if sp and tendencia == "Bajista" else "NO VIABLE",
+        'Put Estado': "VIABLE" if put_viable else "NO VIABLE",
+        'Lado Sugerido': lado_sel,
+        '_sc': sc,
+        '_sp': sp,
     }
 
 # ==========================================
@@ -483,7 +529,7 @@ def main():
     ahora = datetime.now(NY_TZ)
     key_gemini = os.environ.get('GEMINI_API_KEY', '')
     print("=" * 60)
-    print("METODO CARDONA v6 - " + ahora.strftime('%Y-%m-%d %H:%M:%S') + " NY")
+    print("METODO CARDONA v7 - " + ahora.strftime('%Y-%m-%d %H:%M:%S') + " NY")
     print("=" * 60)
 
     sh0 = gc.open_by_key(SPREADSHEET_ID)
@@ -537,15 +583,12 @@ def main():
             lado = str(f.get('Call/Put', ''))
 
             if 'corredor' in tag:
-                # Puerta 1: reversion Cardona
                 reversion = False
                 if lado == 'CALL':
                     reversion = (r['Tendencia 1H'] == 'Bajista') or (r['Put Estado'] == 'VIABLE')
                 else:
                     reversion = (r['Tendencia 1H'] == 'Alcista') or (r['Call Estado'] == 'VIABLE')
-                # Puerta 2: proteccion de ganancia (subio a +200% y cayo bajo +100%)
                 proteccion = (maxbid >= compra * 3.0) and (bid <= compra * 2.0)
-                # Puerta 3: revision IA a las 15:00+
                 ia_vender, razon = (None, '')
                 if ahora.hour >= 15 and key_gemini:
                     ia_vender, razon = revision_ia(f, key_gemini)
@@ -562,7 +605,6 @@ def main():
                     cerrar_fila(f, bid, str(hoy), 'puerta 4: viernes de vencimiento')
                     print("VENTA P4 viernes: " + ticker)
             else:
-                # Lote meta / lote unico
                 if limit > 0 and bid >= limit:
                     cerrar_fila(f, bid, str(hoy), 'venta auto +100%')
                     print("VENTA +100%: " + ticker)
@@ -570,18 +612,20 @@ def main():
                     cerrar_fila(f, bid, str(hoy), 'venta programada viernes')
                     print("VENTA viernes: " + ticker)
 
-        # ============ COMPRAS ============
-        if r['Call Estado'] == 'VIABLE':
-            lado, strike, ask, bid0 = 'CALL', r['Strike Call OTM'], r['Call Ask ($)'], r['Call Bid ($)']
-        elif r['Put Estado'] == 'VIABLE':
-            lado, strike, ask, bid0 = 'PUT', r['Strike Put OTM'], r['Put Ask ($)'], r['Put Bid ($)']
+        # ============ COMPRAS (v7) ============
+        lado = r['Lado Sugerido'] if r['Lado Sugerido'] != 'NINGUNO' else None
+        if lado == 'CALL':
+            strike, ask, bid0 = r['Strike Call OTM'], r['Call Ask ($)'], r['Call Bid ($)']
+        elif lado == 'PUT':
+            strike, ask, bid0 = r['Strike Put OTM'], r['Put Ask ($)'], r['Put Bid ($)']
         else:
-            lado = None
+            strike, ask, bid0 = None, None, None
+
         if lado is None or ticker in tickers_con_pos:
             time.sleep(1); continue
         if str(r['Estrategia Cardona']) in pausadas:
             time.sleep(1); continue
-        if not hora_entrada_ok(str(r['Estrategia Cardona']), lado, ahora):
+        if not hora_entrada_ok(lado, r['_sc'], r['_sp'], ahora):
             time.sleep(1); continue
         if not isinstance(ask, (int, float)) or ask <= 0 or strike == 'N/A':
             time.sleep(1); continue
@@ -626,7 +670,8 @@ def main():
 
     print("=" * 60)
     for r in resultados:
-        print(r['Ticker'] + " | " + r['Estrategia Cardona'] + " | CALL " + r['Call Estado'] + " | PUT " + r['Put Estado'])
+        print(r['Ticker'] + " | " + r['Estrategia Cardona'] + " | CALL " + r['Call Estado'] +
+              " | PUT " + r['Put Estado'] + " | LADO " + r['Lado Sugerido'])
     print("=" * 60)
 
 if __name__ == '__main__':
