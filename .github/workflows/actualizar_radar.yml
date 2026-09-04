@@ -15,6 +15,7 @@ concurrency:
 jobs:
   maquina_1:
     runs-on: ubuntu-latest
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -32,6 +33,7 @@ jobs:
     needs: maquina_1
     if: ${{ failure() }}
     runs-on: ubuntu-22.04
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -49,6 +51,7 @@ jobs:
     needs: maquina_2
     if: ${{ failure() }}
     runs-on: windows-latest
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
