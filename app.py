@@ -1,7 +1,7 @@
 # ==========================================
 # RADAR DE FRANCOTIRADOR - DSS TRADING
-# app.py - VERSION v5.1 (diagnostico de Secrets + width stretch)
-# 25 de agosto de 2026
+# app.py - VERSION v6 FINAL (guia Cardona en la IA)
+# Repo unico: radar-trading-automation
 # ==========================================
 
 import streamlit as st
@@ -36,13 +36,21 @@ MAX_INVERSION = 30.0
 MAX_ABIERTAS = 5
 META_GAIN = 2.0
 COMISION = 0.0
+MODELOS = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-flash-latest']
+
+GUIA_CARDONA = """
+REGLAS GENERALES: decisiones en marco HORA; diario solo para pisos, techos y hanger. Comprar solo en vela formada desde las 11:00 (12, 13, 14, 15 y 15:58). Unica excepcion: Primera Vela Roja a las 10:00 en punto. No salirse ni poner stop si se entro cumpliendo el metodo; solo se pierde lo que costo la opcion. Limit al 100% las primeras semanas. No operar en reuniones de la FED (FOMC); vender antes si hay ganancia.
+CALLS: PM40: en hora PM20 sobre PM40, caida que toca o se acerca al PM40, ruptura de linea bajista con vela verde desde las 11. Caida normal menor a 1.5% o fuerte mayor a 1.5% o 5-6 puntos, siempre en tendencia alcista. Ruptura canal bajista: vela verde fuerte o martillo rompe el techo desde las 11; NUNCA comprar CALL dentro del canal. Gap al alza: abre arriba, dos velas verdes o primera roja y segunda verde fuerte; no dentro de canales. Gap bajista al alza: abre abajo con dos velas verdes o primera roja y segunda verde fuerte; cautela extrema dentro de canal bajista. Piso fuerte: diario PM100 sobre PM200 con caida que toca; en hora vela verde rompe el canal; aparece cada 2-5 meses; subida de 2 a 4 dias. Primer gap al alza: caida previa en zona piso fuerte, primera vela verde obligatoria, volumen alto, compra cerca del cierre 15:58.
+PUTS: Primera vela roja: unica a las 10:00; vela roja o martillo rojo de 9:30-10:00; funciona tambien en tendencia alcista; evitar zonas baratas y pisos fuertes; preferible lejos de PM20 y PM40. Ruptura piso del gap: primera vela verde, se traza el piso, vela roja lo rompe desde las 11; lejos del PM40 tiene mas exito; da 100% el mismo dia o al siguiente. Modelo 4 pasos: canal bajista, zona de techo, subida borrada por vela roja, vela roja rompe la linea de piso trazada. Hanger en diario: cola superior mayor al cuerpo en zona cara o lejos de pisos; compra cerca del cierre 3:55-4:00; el color no importa.
+SALIDAS: vender en la apertura si hay utilidad grande; la venta parcial es sana; el viernes se vende en la tarde para dar tiempo a reversion.
+"""
 
 SIM_HEADERS = [
     'NOM', 'Fecha', 'Hora', 'Simbolo', 'Strike', 'F. Exp', 'Call/Put',
     'Cantidad', 'Precio Compra', 'Total Inv.', 'Precio Limit',
     'Fecha Venta Prog', 'Fecha Venta', 'Precio Venta', 'Total Venta',
-    'Ganancia $', 'Ganancia %', 'Bid Actual', 'Estrategia', 'Estado',
-    'Notas', 'VI', 'DTE', 'Break Even', 'Max Loss'
+    'Ganancia $', 'Ganancia %', 'Bid Actual', 'Max Bid', 'Estrategia',
+    'Estado', 'Notas', 'VI', 'DTE', 'Break Even', 'Max Loss'
 ]
 
 IA_HEADERS = ['Fecha', 'Resumen', 'Lecciones', 'Recomendaciones']
@@ -183,10 +191,8 @@ def gan_pct_viva(row):
     return 0.0
 
 # ==========================================
-# GEMINI (informe semanal con memoria)
+# GEMINI (informe semanal con memoria y GUIA)
 # ==========================================
-
-MODELOS = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-flash-latest']
 
 def limpiar_json(txt):
     txt = txt.strip()
@@ -206,15 +212,18 @@ def informe_gemini(cerradas, lecciones_previas, key):
             ' | venta ' + str(f.get('Precio Venta')) + ' | ' + str(f.get('Ganancia %')) +
             '% | ' + str(f.get('Notas'))
         )
-    prompt = "Eres el analista jefe del Metodo Cardona en opciones OTM.\n"
+    prompt = "GUIA OFICIAL DEL METODO CARDONA:\n" + GUIA_CARDONA + "\n\n"
     prompt += "OPERACIONES CERRADAS DEL SIMULADOR:\n" + "\n".join(lineas) + "\n\n"
     prompt += "LECCIONES DE SEMANAS ANTERIORES:\n" + (lecciones_previas or 'ninguna aun') + "\n\n"
-    prompt += """Responde UNICAMENTE con este JSON valido, en espanol:
+    prompt += """Analiza el desempeno CONTRA LA GUIA: que estrategias ganan, cuales pierden,
+y si alguna operacion violo una regla de la GUIA (horario, zona, tendencia).
+Responde UNICAMENTE con este JSON valido, en espanol:
 {
  "resumen": "resumen de 3-4 frases del desempeno total",
  "win_rate_por_estrategia": {"nombre estrategia": "porcentaje de aciertos"},
- "lecciones": ["lecciones nuevas aprendidas, cortas y accionables"],
- "recomendaciones": ["reglas concretas a aplicar la proxima semana"]
+ "reglas_violadas": ["reglas de la GUIA que se violaron, si hubo"],
+ "lecciones": ["lecciones nuevas, cortas y accionables"],
+ "recomendaciones": ["ajustes concretos de reglas para la proxima semana"]
 }"""
     for modelo in MODELOS:
         url = 'https://generativelanguage.googleapis.com/v1beta/models/' + modelo + ':generateContent?key=' + key
@@ -649,15 +658,16 @@ if ws_sim is not None and not senales.empty:
                 dte = 0
             f_prog = viernes_venta_prog(ahora.date())
             be = round(strike_v + ask_v, 2) if s['Lado'] == 'CALL' else round(strike_v - ask_v, 2)
-            lotes = ['lote meta +100%', 'lote viernes'] if qty == 2 else ['lote unico: meta o viernes']
+            lotes = ['lote meta +100%', 'lote corredor (IA/reversion)'] if qty == 2 else ['lote unico: meta o viernes']
             for nota_lote in lotes:
+                lim = round(ask_v * META_GAIN, 2) if 'meta' in nota_lote or 'unico' in nota_lote else ''
                 filas_sim.append({
                     'NOM': 'MANUAL', 'Fecha': ahora.strftime('%Y-%m-%d'), 'Hora': ahora.strftime('%H:%M:%S'),
                     'Simbolo': tk, 'Strike': strike_v, 'F. Exp': venc, 'Call/Put': s['Lado'],
                     'Cantidad': 1, 'Precio Compra': ask_v, 'Total Inv.': round(costo, 2),
-                    'Precio Limit': round(ask_v * META_GAIN, 2), 'Fecha Venta Prog': f_prog.strftime('%Y-%m-%d'),
+                    'Precio Limit': lim, 'Fecha Venta Prog': f_prog.strftime('%Y-%m-%d'),
                     'Fecha Venta': '', 'Precio Venta': '', 'Total Venta': '', 'Ganancia $': '', 'Ganancia %': '',
-                    'Bid Actual': '', 'Estrategia': s['Estrategia Cardona'], 'Estado': 'ABIERTA',
+                    'Bid Actual': '', 'Max Bid': '', 'Estrategia': s['Estrategia Cardona'], 'Estado': 'ABIERTA',
                     'Notas': nota_lote + ' | compra manual', 'VI': '', 'DTE': dte, 'Break Even': be,
                     'Max Loss': round(costo + COMISION, 2)
                 })
@@ -845,14 +855,14 @@ if cerradas:
 else:
     st.caption("Aun no hay operaciones cerradas.")
 
-st.subheader("Informe semanal de la IA (aprendizaje)")
+st.subheader("Informe semanal de la IA (aprendizaje con la GUIA)")
 if st.button("Generar informe semanal con IA"):
     if not KEY_G:
         st.warning("Falta GEMINI_API_KEY en Secrets.")
     elif not cerradas:
         st.info("Aun no hay operaciones cerradas para analizar.")
     else:
-        with st.spinner("Gemini analizando el historial..."):
+        with st.spinner("Gemini analizando el historial contra la GUIA..."):
             ws_ia = abrir_informe_ia(sh_sim)
             lecciones_previas = ''
             if ws_ia is not None:
@@ -866,6 +876,11 @@ if st.button("Generar informe semanal con IA"):
             st.markdown("**Resumen:** " + str(ia.get('resumen', '')))
             st.markdown("**Win rate por estrategia:**")
             st.json(ia.get('win_rate_por_estrategia', {}))
+            rv = ia.get('reglas_violadas', [])
+            if rv:
+                st.markdown("**Reglas de la GUIA violadas:**")
+                for e in rv:
+                    st.markdown("- " + str(e))
             st.markdown("**Lecciones (memoria del sistema):**")
             for e in ia.get('lecciones', []):
                 st.markdown("- " + str(e))
