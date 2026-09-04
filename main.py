@@ -1,7 +1,6 @@
 # ==========================================
-# METODO CARDONA - main.py v10 DEFINITIVO
-# Una estrategia por empresa + GUIA en la IA
-# Viernes en la tarde + FOMC + filtros de spread
+# METODO CARDONA - main.py v11 FINAL
+# Ventas blindadas (corren aunque falle el radar)
 # Repo unico: radar-trading-automation
 # ==========================================
 
@@ -42,8 +41,6 @@ COMISION = 0.0
 MIN_ASK = 0.05
 MODELOS = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-flash-latest']
 
-# Fechas FOMC 2026 (actualiza cada ano desde federalreserve.gov)
-# Regla 8 del curso: esos dias NO se invierte
 FOMC_2026 = ['2026-01-27', '2026-01-28', '2026-03-17', '2026-03-18',
              '2026-04-28', '2026-04-29', '2026-06-16', '2026-06-17',
              '2026-07-28', '2026-07-29', '2026-09-15', '2026-09-16',
@@ -178,7 +175,6 @@ def obtener_datos_opciones(stock, precio):
         if not exps:
             return None
         hoy = datetime.now().date()
-        # Regla del curso: lun-mie -> viernes de esta semana; jue-vie -> viernes siguiente
         objetivo = viernes_venta_prog(hoy)
         venc = None
         for e in exps:
@@ -328,11 +324,10 @@ def estrategia_hanger_diario(dd):
     return a > b
 
 # ==========================================
-# AUTOPILOTO: reglas
+# REGLAS AUTOPILOTO
 # ==========================================
 
 def hora_entrada_ok(estrategia, ahora):
-    """PVR 10-11; Hanger y Primer Gap solo 15:58; resto 11+"""
     if ahora.weekday() > 4:
         return False
     h = ahora.hour
@@ -368,7 +363,7 @@ def cerrar_fila(row, bid, hoy_str, nota):
     row['Notas'] = str(row.get('Notas', '')) + ' | ' + nota
 
 # ==========================================
-# IA: revision diaria con la GUIA
+# IA CON GUIA
 # ==========================================
 
 def limpiar_json(txt):
@@ -390,7 +385,7 @@ def revision_ia(f, key):
               "POSICION ABIERTA: " + str(f.get('Simbolo')) + " " + str(f.get('Call/Put')) +
               " strike " + str(f.get('Strike')) + ", compra " + str(compra) + ", bid " + str(bid) +
               ", ganancia " + str(gan) + "%, estrategia " + str(f.get('Estrategia')) +
-              ". Segun la GUIA, ¿la tesis de esta estrategia sigue vigente o se rompieron sus condiciones?" +
+              ". Segun la GUIA, ¿la tesis sigue vigente o se rompieron sus condiciones?" +
               " Responde SOLO JSON: {\"decision\": \"VENDER\" o \"MANTENER\", \"razon\": \"frase corta\"}")
     for modelo in MODELOS:
         url = 'https://generativelanguage.googleapis.com/v1beta/models/' + modelo + ':generateContent?key=' + key
@@ -407,7 +402,7 @@ def revision_ia(f, key):
     return None, ''
 
 # ==========================================
-# ANALISIS RADAR (una sola estrategia)
+# ANALISIS RADAR
 # ==========================================
 
 def analizar_activo(ticker, ahora):
@@ -557,7 +552,7 @@ def main():
     key_gemini = os.environ.get('GEMINI_API_KEY', '')
     dia_fomc = ahora.strftime('%Y-%m-%d') in FOMC_2026
     print("=" * 60)
-    print("METODO CARDONA v10 - " + ahora.strftime('%Y-%m-%d %H:%M:%S') + " NY")
+    print("METODO CARDONA v11 - " + ahora.strftime('%Y-%m-%d %H:%M:%S') + " NY")
     if dia_fomc:
         print("HOY ES REUNION FOMC: sin compras nuevas (Regla 8)")
     print("=" * 60)
@@ -577,11 +572,10 @@ def main():
 
     for ticker in TICKERS:
         r = analizar_activo(ticker, ahora)
-        if r is None:
-            continue
-        resultados.append(r)
+        if r is not None:
+            resultados.append(r)
 
-        # ============ VENTAS (4 puertas, viernes en tarde) ============
+        # ============ VENTAS (blindadas: corren aunque r sea None) ============
         for f in filas:
             if str(f.get('Estado', '')) != 'ABIERTA' or str(f.get('Simbolo', '')) != ticker:
                 continue
@@ -602,22 +596,30 @@ def main():
             except Exception: maxbid = 0.0
             maxbid = max(maxbid, bid)
             f['Max Bid'] = maxbid
-            if bid <= 0 or compra <= 0:
-                continue
             try: limit = float(f.get('Precio Limit', 0) or 0)
             except Exception: limit = 0.0
             try: fprog = datetime.strptime(str(f.get('Fecha Venta Prog', '')), '%Y-%m-%d').date()
             except Exception: fprog = ahora.date()
             hoy = ahora.date()
+
+            # Limpieza: expiro sin valor
+            if hoy > fprog and bid <= 0:
+                cerrar_fila(f, 0.0, str(hoy), 'expiro sin valor (limpieza)')
+                print("VENTA limpieza expirada: " + ticker)
+                continue
+            if bid <= 0 or compra <= 0:
+                continue
+
             tag = str(f.get('Notas', ''))
             lado = str(f.get('Call/Put', ''))
 
             if 'corredor' in tag:
                 reversion = False
-                if lado == 'CALL':
-                    reversion = (r['Tendencia 1H'] == 'Bajista') or (r['Put Estado'] == 'VIABLE')
-                else:
-                    reversion = (r['Tendencia 1H'] == 'Alcista') or (r['Call Estado'] == 'VIABLE')
+                if r is not None:
+                    if lado == 'CALL':
+                        reversion = (r['Tendencia 1H'] == 'Bajista') or (r['Put Estado'] == 'VIABLE')
+                    else:
+                        reversion = (r['Tendencia 1H'] == 'Alcista') or (r['Call Estado'] == 'VIABLE')
                 proteccion = (maxbid >= compra * 3.0) and (bid <= compra * 2.0)
                 ia_vender, razon = (None, '')
                 if ahora.hour >= 15 and key_gemini:
@@ -632,7 +634,7 @@ def main():
                     cerrar_fila(f, bid, str(hoy), 'puerta 3: IA (' + razon + ')')
                     print("VENTA P3 IA: " + ticker)
                 elif hoy > fprog:
-                    cerrar_fila(f, bid, str(hoy), 'puerta 4: venta tardia (vencimiento pasado)')
+                    cerrar_fila(f, bid, str(hoy), 'puerta 4: venta tardia')
                     print("VENTA P4 tardia: " + ticker)
                 elif hoy == fprog and ahora.hour >= 15:
                     cerrar_fila(f, bid, str(hoy), 'puerta 4: viernes en la tarde')
@@ -642,13 +644,15 @@ def main():
                     cerrar_fila(f, bid, str(hoy), 'venta auto +100%')
                     print("VENTA +100%: " + ticker)
                 elif hoy > fprog:
-                    cerrar_fila(f, bid, str(hoy), 'venta tardia (vencimiento pasado)')
+                    cerrar_fila(f, bid, str(hoy), 'venta tardia')
                     print("VENTA tardia: " + ticker)
                 elif hoy == fprog and ahora.hour >= 15:
                     cerrar_fila(f, bid, str(hoy), 'venta viernes en la tarde')
                     print("VENTA viernes tarde: " + ticker)
 
-        # ============ COMPRAS (v10 con filtros) ============
+        # ============ COMPRAS (requieren radar OK) ============
+        if r is None:
+            time.sleep(1); continue
         lado = r['Lado Sugerido'] if r['Lado Sugerido'] != 'NINGUNO' else None
         if lado == 'CALL':
             strike, ask, bid0 = r['Strike Call OTM'], r['Call Ask ($)'], r['Call Bid ($)']
@@ -670,10 +674,10 @@ def main():
         if not isinstance(ask, (int, float)) or ask <= 0 or strike == 'N/A':
             time.sleep(1); continue
         if ask < MIN_ASK:
-            print("AUTOPILOTO: " + ticker + " ask muy baja (spread), no compra")
+            print("AUTOPILOTO: " + ticker + " ask muy baja, no compra")
             time.sleep(1); continue
         if bid0 > 0 and bid0 < 0.4 * ask:
-            print("AUTOPILOTO: " + ticker + " spread demasiado ancho, no compra")
+            print("AUTOPILOTO: " + ticker + " spread ancho, no compra")
             time.sleep(1); continue
 
         costo = ask * 100.0
