@@ -1,6 +1,6 @@
 # ==========================================
 # RADAR DE FRANCOTIRADOR - DSS TRADING
-# app.py - VERSION v6 FINAL (guia Cardona en la IA)
+# app.py - VERSION v7 (auto-refresco + escaneos faltantes automaticos)
 # Repo unico: radar-trading-automation
 # ==========================================
 
@@ -26,6 +26,7 @@ BAJA = "\u25BC"
 NEU = "\u25CF"
 
 st.set_page_config(page_title="Radar DSS Trading", layout="wide")
+st_autorefresh(interval=300000, key="autorefresh_global")
 
 SPREADSHEET_ID = '17cu_GUSQl5CWR1UXONrLPyaKD-0l0OdlwWMmg_e-G0U'
 URL_CSV = 'https://docs.google.com/spreadsheets/d/' + SPREADSHEET_ID + '/export?format=csv&gid=0'
@@ -37,6 +38,8 @@ MAX_ABIERTAS = 5
 META_GAIN = 2.0
 COMISION = 0.0
 MODELOS = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-flash-latest']
+
+SCAN_TIMES = [(9, 31), (10, 1), (11, 1), (12, 1), (13, 1), (14, 1), (15, 1), (15, 58)]
 
 GUIA_CARDONA = """
 REGLAS GENERALES: decisiones en marco HORA; diario solo para pisos, techos y hanger. Comprar solo en vela formada desde las 11:00 (12, 13, 14, 15 y 15:58). Unica excepcion: Primera Vela Roja a las 10:00 en punto. No salirse ni poner stop si se entro cumpliendo el metodo; solo se pierde lo que costo la opcion. Limit al 100% las primeras semanas. No operar en reuniones de la FED (FOMC); vender antes si hay ganancia.
@@ -59,6 +62,8 @@ if 'esperando' not in st.session_state:
     st.session_state['esperando'] = False
 if 'aviso_listo' not in st.session_state:
     st.session_state['aviso_listo'] = False
+if 'auto_dispatch_hecho' not in st.session_state:
+    st.session_state['auto_dispatch_hecho'] = ''
 
 # ==========================================
 # CONEXIONES CON DIAGNOSTICO VISIBLE
@@ -268,6 +273,54 @@ def estado_robot():
     except Exception:
         return None, None
 
+def lanzar_dispatch():
+    token = st.secrets["GH_TOKEN"]
+    url = "https://api.github.com/repos/" + REPO + "/actions/workflows/actualizar_radar.yml/dispatches"
+    req = urllib.request.Request(
+        url,
+        data=json.dumps({"ref": "main"}).encode("utf-8"),
+        headers={
+            "Authorization": "token " + token,
+            "Accept": "application/vnd.github+json",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    urllib.request.urlopen(req)
+
+def auto_dispatch_faltante():
+    """Si el escaneo de la hora Cardona que ya paso no esta en el Sheet, lo lanza solo"""
+    ahora = datetime.now(ZONA_NY)
+    if ahora.weekday() > 4:
+        return
+    pendientes = [t for t in SCAN_TIMES if (ahora.hour, ahora.minute) >= t]
+    if not pendientes:
+        return
+    obj = pendientes[-1]
+    obj_dt = datetime(ahora.year, ahora.month, ahora.day, obj[0], obj[1])
+    fecha_sheet = leer_fecha_sheet()
+    if fecha_sheet:
+        try:
+            f_sheet = datetime.strptime(fecha_sheet, '%Y-%m-%d %H:%M:%S')
+            if f_sheet >= obj_dt:
+                return
+        except Exception:
+            pass
+    st_status, _ = estado_robot()
+    if st_status in ('in_progress', 'queued'):
+        return
+    clave = ahora.strftime('%Y-%m-%d') + '-' + str(obj[0]) + ':' + str(obj[1])
+    if st.session_state.get('auto_dispatch_hecho') == clave:
+        return
+    st.session_state['auto_dispatch_hecho'] = clave
+    try:
+        lanzar_dispatch()
+        st.session_state['esperando'] = True
+        st.session_state['hora_lanzamiento'] = ahora.strftime('%Y-%m-%d %H:%M:%S')
+        st.rerun()
+    except Exception:
+        pass
+
 @st.cache_data(ttl=300)
 def serie(ticker, intervalo, periodo):
     df = yf.Ticker(ticker).history(period=periodo, interval=intervalo)
@@ -454,6 +507,8 @@ df['Put Estado'] = df['Put Estado'].astype(str).str.strip()
 fecha = df['Fecha_Hora_Escaneo'].iloc[0]
 st.caption("Ultimo escaneo (hora Nueva York): " + str(fecha))
 
+auto_dispatch_faltante()
+
 if st.session_state['aviso_listo']:
     st.success("LISTO. El escaneo llego: los datos ya estan actualizados.")
     st.session_state['aviso_listo'] = False
@@ -602,6 +657,7 @@ st.divider()
 
 st.sidebar.header("Panel de Control")
 ticker_sel = st.sidebar.selectbox("Empresa para grafica", df['Ticker'].tolist())
+st.sidebar.caption("Modo automatico: la app se refresca cada 5 min y lanza sola el escaneo faltante del horario Cardona.")
 
 st.sidebar.markdown("---")
 st.sidebar.header("SIMULADOR - AUTOPILOTO")
@@ -704,19 +760,7 @@ st.sidebar.markdown("---")
 st.sidebar.header("Actualizacion")
 if st.sidebar.button("Lanzar escaneo ahora"):
     try:
-        token = st.secrets["GH_TOKEN"]
-        url = "https://api.github.com/repos/" + REPO + "/actions/workflows/actualizar_radar.yml/dispatches"
-        req = urllib.request.Request(
-            url,
-            data=json.dumps({"ref": "main"}).encode("utf-8"),
-            headers={
-                "Authorization": "token " + token,
-                "Accept": "application/vnd.github+json",
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
-        urllib.request.urlopen(req)
+        lanzar_dispatch()
         st.session_state['esperando'] = True
         st.session_state['hora_lanzamiento'] = datetime.now(ZONA_NY).strftime('%Y-%m-%d %H:%M:%S')
         st.sidebar.success("Escaneo lanzado.")
