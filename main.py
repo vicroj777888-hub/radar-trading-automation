@@ -1,6 +1,7 @@
 # ==========================================
-# METODO CARDONA - main.py v11 FINAL
-# Ventas blindadas (corren aunque falle el radar)
+# METODO CARDONA - main.py v15
+# MODO SIMULACION - NO SE ENVIAN ORDENES REALES
+# Cierres por vencimiento blindados, zoneinfo, escrituras seguras
 # Repo unico: radar-trading-automation
 # ==========================================
 
@@ -12,34 +13,47 @@ import gspread
 from google.oauth2.service_account import Credentials
 import json
 import os
-import pytz
 import time
 import requests
+from zoneinfo import ZoneInfo
+
+VERSION = 'v15'
+NY_TZ = ZoneInfo('America/New_York')
 
 SCOPES = [
     'https://www.googleapis.com/auth/spreadsheets',
     'https://www.googleapis.com/auth/drive'
 ]
 
-try:
+gc = None
+
+def conectar_sheets():
+    global gc
     credentials_json = os.environ['GOOGLE_CREDENTIALS']
     credentials_info = json.loads(credentials_json)
     creds = Credentials.from_service_account_info(credentials_info, scopes=SCOPES)
     gc = gspread.authorize(creds)
-except Exception as e:
-    print("Error critico en autenticacion: " + str(e))
-    raise
 
 SPREADSHEET_ID = '17cu_GUSQl5CWR1UXONrLPyaKD-0l0OdlwWMmg_e-G0U'
-TICKERS = ['F', 'T', 'PFE', 'VALE', 'AAL', 'BAC', 'USO', 'SOFI', 'CCL', 'NFLX']
-NY_TZ = pytz.timezone('America/New_York')
+TICKERS = ['SPY', 'F', 'T', 'PFE', 'VALE', 'AAL', 'BAC', 'USO', 'SOFI', 'CCL', 'NFLX']
 
 MAX_INVERSION = 30.0
 MAX_ABIERTAS = 5
+MAX_TRADES_SEMANA = 4
 META_GAIN = 2.0
-COMISION = 0.0
+COMISION = float(os.environ.get('COMISION_USD', '0.0'))
 MIN_ASK = 0.05
+MULTIPLICADOR = 100.0
 MODELOS = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-flash-latest']
+
+OBJETIVOS_ESCANEO = [(9, 31), (10, 1), (11, 1), (12, 1), (13, 1), (14, 1), (15, 1), (15, 58), (16, 5)]
+
+RANGOS_ASK = {
+    'SPY': (0.25, 0.30), 'QQQ': (0.25, 0.30), 'BAC': (0.10, 0.20), 'SLV': (0.10, 0.20),
+    'USO': (0.10, 0.20), 'AAPL': (0.45, 0.80), 'FB': (0.45, 0.80), 'AMZN': (0.60, 0.80),
+    'TNA': (0.60, 0.80), 'GLD': (0.60, 0.80), 'XOM': (0.60, 0.80), 'CVX': (0.60, 0.80),
+    'NVDA': (0.60, 0.80), 'NFLX': (1.50, 2.50), 'MRNA': (2.00, 2.50), 'TSLA': (2.50, 3.00),
+}
 
 FOMC_2026 = ['2026-01-27', '2026-01-28', '2026-03-17', '2026-03-18',
              '2026-04-28', '2026-04-29', '2026-06-16', '2026-06-17',
@@ -77,8 +91,29 @@ SIM_HEADERS = [
 ]
 
 # ==========================================
-# DATOS Y VELAS
+# REGISTRO DE ERRORES (sin secretos)
 # ==========================================
+
+def registrar_error(funcion, simbolo, operacion, error):
+    msg = str(error)
+    for secreto in (os.environ.get('GEMINI_API_KEY', ''), os.environ.get('GOOGLE_CREDENTIALS', '')):
+        if secreto:
+            msg = msg.replace(secreto, '***')
+    print('ERROR [' + datetime.now(NY_TZ).strftime('%Y-%m-%d %H:%M:%S') + '] ' +
+          funcion + ' | ' + simbolo + ' | ' + operacion + ' | ' + type(error).__name__ + ': ' + msg)
+
+# ==========================================
+# ZONA HORARIA Y DATOS
+# ==========================================
+
+def normalizar_ny(df):
+    """Convierte el indice de Yahoo (UTC o naive) a America/New_York"""
+    out = df.copy()
+    idx = out.index
+    if getattr(idx, 'tz', None) is None:
+        idx = idx.tz_localize('UTC')
+    out.index = idx.tz_convert(NY_TZ)
+    return out
 
 def obtener_datos(ticker):
     try:
@@ -92,32 +127,29 @@ def obtener_datos(ticker):
         datos_diarios['SMA40'] = datos_diarios['Close'].rolling(40).mean()
         datos_diarios['SMA100'] = datos_diarios['Close'].rolling(100).mean()
         datos_diarios['SMA200'] = datos_diarios['Close'].rolling(200).mean()
+        datos_horarios = normalizar_ny(datos_horarios)
+        datos_30m = normalizar_ny(datos_30m) if datos_30m is not None and not datos_30m.empty else datos_30m
+        if datos_30m is not None and not datos_30m.empty:
+            datos_30m = datos_30m
         datos_horarios['SMA20'] = datos_horarios['Close'].rolling(20).mean()
         datos_horarios['SMA40'] = datos_horarios['Close'].rolling(40).mean()
         return datos_diarios, datos_horarios, datos_30m, stock
     except Exception as e:
-        print("Error datos " + ticker + ": " + str(e))
+        registrar_error('obtener_datos', ticker, 'descarga de historicos', e)
         return None, None, None, None
 
 def velas_de_hoy(datos_horarios):
-    h = datos_horarios.copy()
-    h['fecha'] = h.index.date
-    return h[h['fecha'] == h['fecha'].iloc[-1]]
+    ultima = datos_horarios.index.date.max()
+    return datos_horarios[datos_horarios.index.date == ultima]
 
 def primera_vela_del_dia(datos_30m, ahora_ny):
     if datos_30m is None or len(datos_30m) == 0:
         return None
-    df = datos_30m.copy()
-    ts = df.index
-    try:
-        ts = ts.tz_localize(NY_TZ) if ts.tz is None else ts.tz_convert(NY_TZ)
-    except Exception:
-        return None
-    df['t'] = ts
-    dia = df[ts.date == ts.date.max()]
+    df = datos_30m
+    dia = df[df.index.date == df.index.date.max()]
     if dia.empty:
         return None
-    reg = dia[(dia['t'].dt.hour > 9) | ((dia['t'].dt.hour == 9) & (dia['t'].dt.minute >= 30))]
+    reg = dia[(dia.index.hour > 9) | ((dia.index.hour == 9) & (dia.index.minute >= 30))]
     if reg.empty or ahora_ny.hour < 10:
         return None
     return reg.iloc[0]
@@ -169,12 +201,30 @@ def viernes_venta_prog(f):
     delta = 4 - wd if wd <= 2 else (8 if wd == 3 else (7 if wd == 4 else (6 if wd == 5 else 5)))
     return f + timedelta(days=delta)
 
-def obtener_datos_opciones(stock, precio):
+def elegir_fila_rango(df_op, precio, lado, ticker):
+    if df_op is None or df_op.empty:
+        return None
+    if lado == 'CALL':
+        cand = df_op[df_op['strike'] > precio]
+    else:
+        cand = df_op[df_op['strike'] < precio]
+    if cand.empty:
+        return None
+    rng = RANGOS_ASK.get(ticker)
+    if rng:
+        asks = cand['ask'].fillna(0).astype(float)
+        dentro = cand[(asks >= rng[0]) & (asks <= rng[1])]
+        if not dentro.empty:
+            a = dentro['ask'].fillna(0).astype(float)
+            return dentro.iloc[int(a.values.argmax())]
+    return cand.iloc[0] if lado == 'CALL' else cand.iloc[-1]
+
+def obtener_datos_opciones(stock, precio, ticker):
     try:
         exps = stock.options
         if not exps:
             return None
-        hoy = datetime.now().date()
+        hoy = datetime.now(NY_TZ).date()
         objetivo = viernes_venta_prog(hoy)
         venc = None
         for e in exps:
@@ -198,23 +248,21 @@ def obtener_datos_opciones(stock, precio):
             return None
         chain = stock.option_chain(venc)
         out = {'venc': str(venc)}
-        co = chain.calls[chain.calls['strike'] > precio]
-        if not co.empty:
-            r = co.iloc[0]
-            p, b, iv = leer_fila_opcion(r)
-            out.update({'strike_call': float(r['strike']), 'call_ask': p, 'call_bid': b, 'call_iv': iv})
+        rc = elegir_fila_rango(chain.calls, precio, 'CALL', ticker)
+        if rc is not None:
+            p, b, iv = leer_fila_opcion(rc)
+            out.update({'strike_call': float(rc['strike']), 'call_ask': p, 'call_bid': b, 'call_iv': iv})
         else:
             out.update({'strike_call': 'N/A', 'call_ask': 'N/A', 'call_bid': 'N/A', 'call_iv': 'N/A'})
-        po = chain.puts[chain.puts['strike'] < precio]
-        if not po.empty:
-            r = po.iloc[-1]
-            p, b, iv = leer_fila_opcion(r)
-            out.update({'strike_put': float(r['strike']), 'put_ask': p, 'put_bid': b, 'put_iv': iv})
+        rp = elegir_fila_rango(chain.puts, precio, 'PUT', ticker)
+        if rp is not None:
+            p, b, iv = leer_fila_opcion(rp)
+            out.update({'strike_put': float(rp['strike']), 'put_ask': p, 'put_bid': b, 'put_iv': iv})
         else:
             out.update({'strike_put': 'N/A', 'put_ask': 'N/A', 'put_bid': 'N/A', 'put_iv': 'N/A'})
         return out
     except Exception as e:
-        print("Error opciones: " + str(e))
+        registrar_error('obtener_datos_opciones', ticker, 'cadena de opciones', e)
         return None
 
 def bid_de_cadena(chain, strike, lado):
@@ -227,7 +275,8 @@ def bid_de_cadena(chain, strike, lado):
         bid = float(r['bid']) if pd.notna(r['bid']) else 0.0
         last = float(r['lastPrice']) if pd.notna(r['lastPrice']) else 0.0
         return round(bid if bid > 0 else last, 2)
-    except Exception:
+    except Exception as e:
+        registrar_error('bid_de_cadena', str(strike), 'lectura de bid', e)
         return 0.0
 
 # ==========================================
@@ -235,16 +284,19 @@ def bid_de_cadena(chain, strike, lado):
 # ==========================================
 
 def estrategia_pm40(dd, dh):
-    if len(dh) < 40 or len(dh) < 2:
+    if len(dh) < 40 or len(dh) < 4:
         return False
     pm20_h = float(dh['SMA20'].iloc[-1])
     pm40_h = float(dh['SMA40'].iloc[-1])
     if pm20_h <= pm40_h:
         return False
-    p = float(dh['Close'].iloc[-1])
-    if p >= float(dh['Close'].iloc[-2]):
+    u = dh.iloc[-1]
+    if not es_vela_verde(u):
         return False
-    return abs(p - pm40_h) / pm40_h * 100 <= 2.0
+    if float(u['Close']) <= float(dh['High'].iloc[-2]):
+        return False
+    recientes = dh['Close'].iloc[-4:-1]
+    return any(abs(c - pm40_h) / pm40_h * 100 <= 2.0 for c in recientes)
 
 def estrategia_caida(dd, dh):
     if len(dh) < 2: return False, ""
@@ -286,13 +338,25 @@ def estrategia_piso_fuerte(dd, dh):
     u = dh.iloc[-1]
     return es_vela_verde_fuerte(u) and float(u['Close']) > techo
 
-def estrategia_primer_gap(dd, dh):
+def estrategia_primer_gap(dd, dh, ticker):
+    """Exige gap real: apertura de hoy > cierre de ayer (velas horarias NY)"""
     hoy = velas_de_hoy(dh)
-    if len(dd) < 200 or len(hoy) < 1: return False
+    if len(dd) < 200 or len(hoy) < 1:
+        return False
+    ultima = dh.index.date.max()
+    antes = dh[dh.index.date < ultima]
+    if antes.empty:
+        return False
+    cierre_ayer = float(antes['Close'].iloc[-1])
+    open_hoy = float(hoy['Open'].iloc[0])
+    if open_hoy <= cierre_ayer:
+        return False
     p = float(dd['Close'].iloc[-1])
-    if not ((p <= float(dd['SMA100'].iloc[-1]) * 1.05) or (p <= float(dd['SMA200'].iloc[-1]) * 1.03)): return False
+    if not ((p <= float(dd['SMA100'].iloc[-1]) * 1.05) or (p <= float(dd['SMA200'].iloc[-1]) * 1.03)):
+        return False
     v1 = hoy.iloc[0]
-    return es_vela_verde(v1) and float(v1['Volume']) >= 1000000
+    vol_min = 20000000 if ticker == 'SPY' else 1000000
+    return es_vela_verde(v1) and float(v1['Volume']) >= vol_min
 
 def estrategia_primera_vela_roja(d30, ahora):
     v = primera_vela_del_dia(d30, ahora)
@@ -306,15 +370,17 @@ def estrategia_ruptura_piso_gap(dh):
     return bool((hoy.iloc[1:]['Close'] < float(v1['Low'])).any())
 
 def estrategia_modelo_4_pasos(dh):
-    if len(dh) < 3: return False
+    if len(dh) < 6: return False
     hay, techo = detectar_canal_bajista(dh)
-    if not hay: return False
+    if not hay or not techo: return False
     vv, vb, vr = dh.iloc[-3], dh.iloc[-2], dh.iloc[-1]
     if not (es_vela_verde(vv) and es_vela_roja(vb) and es_vela_roja(vr)): return False
     if float(vb['Close']) >= float(vv['Close']): return False
     mn = dh.tail(10)['Low'].rolling(3).min().dropna()
     if len(mn) < 3: return False
-    return float(vr['Close']) < (techo + float(mn.iloc[-1])) / 2
+    if float(vr['Close']) >= (techo + float(mn.iloc[-1])) / 2: return False
+    subida = float(dh['High'].iloc[-6:-2].max())
+    return subida >= techo * 0.99
 
 def estrategia_hanger_diario(dd):
     if len(dd) < 20: return False
@@ -335,10 +401,20 @@ def hora_entrada_ok(estrategia, ahora):
     if h < 9 or h >= 16:
         return False
     if estrategia == 'Primera Vela Roja':
-        return 10 <= h < 11
+        return h == 10 and m <= 5
     if estrategia in ('Hanger en Diario', 'Primer Gap al Alza'):
         return h >= 15 and m >= 55
     return h >= 11
+
+def es_hora_de_escaneo(ahora, tolerancia_min=9):
+    if ahora.weekday() > 4:
+        return False
+    for h, m in OBJETIVOS_ESCANEO:
+        objetivo = ahora.replace(hour=h, minute=m, second=0, microsecond=0)
+        delta = (ahora - objetivo).total_seconds() / 60.0
+        if 0 <= delta <= tolerancia_min:
+            return True
+    return False
 
 def estrategias_pausadas(filas):
     stats = {}
@@ -357,10 +433,59 @@ def cerrar_fila(row, bid, hoy_str, nota):
     row['Estado'] = 'CERRADA'
     row['Fecha Venta'] = hoy_str
     row['Precio Venta'] = bid
-    row['Total Venta'] = round(bid * 100.0, 2)
-    row['Ganancia $'] = round((bid - compra) * 100.0, 2)
+    row['Total Venta'] = round(bid * MULTIPLICADOR, 2)
+    row['Ganancia $'] = round((bid - compra) * MULTIPLICADOR, 2)
     row['Ganancia %'] = round((bid / compra - 1.0) * 100.0, 2) if compra > 0 else 0.0
     row['Notas'] = str(row.get('Notas', '')) + ' | ' + nota
+
+def cerrar_si_vencida(row, ahora):
+    """Cierra con F. Exp (fecha real). Devuelve True si cerro la fila."""
+    if str(row.get('Estado', '')) != 'ABIERTA':
+        return False
+    raw = str(row.get('F. Exp', '')).strip()
+    if not raw:
+        registrar_error('cerrar_si_vencida', str(row.get('Simbolo', '')), 'F. Exp vacia: no se cierra automaticamente', ValueError('F. Exp vacia'))
+        return False
+    try:
+        fexp = datetime.strptime(raw, '%Y-%m-%d').date()
+    except Exception as e:
+        registrar_error('cerrar_si_vencida', str(row.get('Simbolo', '')), 'F. Exp invalida: ' + raw, e)
+        return False
+    hoy = ahora.date()
+    if hoy < fexp:
+        return False
+    if hoy == fexp and ahora.hour < 16:
+        return False
+    try: bid_residuo = float(row.get('Bid Actual', 0) or 0)
+    except Exception: bid_residuo = 0.0
+    precio = bid_residuo if bid_residuo > 0 else 0.0
+    nota = 'vencida con valor residual' if precio > 0 else 'vencida sin valor'
+    cerrar_fila(row, precio, str(hoy), nota)
+    print('CIERRE POR VENCIMIENTO: ' + str(row.get('Simbolo', '')) + ' F.Exp ' + raw + ' -> ' + nota)
+    return True
+
+def decidir_venta(tag, lado, bid_usar, compra, maxbid, limit, hoy, fprog, hora, reversion, ia_vender):
+    """Devuelve (cerrar, nota). Logica pura y probable."""
+    if 'corredor' in tag:
+        if reversion:
+            return True, 'puerta 1: reversion Cardona'
+        if compra > 0 and maxbid >= compra * 3.0 and bid_usar <= compra * 2.0:
+            return True, 'puerta 2: proteccion de ganancia'
+        if ia_vender == 'VENDER':
+            return True, 'puerta 3: IA'
+        if hoy > fprog:
+            return True, 'puerta 4: venta tardia'
+        if hoy == fprog and hora >= 15:
+            return True, 'puerta 4: viernes en la tarde'
+        return False, ''
+    else:
+        if limit > 0 and bid_usar >= limit:
+            return True, 'venta auto +100%'
+        if hoy > fprog:
+            return True, 'venta tardia'
+        if hoy == fprog and hora >= 15:
+            return True, 'venta viernes en la tarde'
+        return False, ''
 
 # ==========================================
 # IA CON GUIA
@@ -396,8 +521,9 @@ def revision_ia(f, key):
             if r.status_code == 200:
                 d = json.loads(limpiar_json(r.json()['candidates'][0]['content']['parts'][0]['text']))
                 return str(d.get('decision', '')).upper(), str(d.get('razon', ''))
-        except Exception:
-            pass
+            registrar_error('revision_ia', str(f.get('Simbolo', '')), 'respuesta HTTP ' + str(r.status_code) + ' modelo ' + modelo, RuntimeError('HTTP ' + str(r.status_code)))
+        except Exception as e:
+            registrar_error('revision_ia', str(f.get('Simbolo', '')), 'llamada modelo ' + modelo, e)
         time.sleep(1)
     return None, ''
 
@@ -412,19 +538,19 @@ def analizar_activo(ticker, ahora):
         return None
     precio = float(dh['Close'].iloc[-1])
     abierto = not velas_de_hoy(dh).empty
-
     sma40 = float(dh['SMA40'].iloc[-1]) if len(dh) >= 40 else precio
     tendencia = "Alcista" if precio > sma40 else "Bajista"
     dist = f"{((precio - sma40) / sma40 * 100):.2f}%" if sma40 > 0 else "N/A"
+    dist40 = abs(precio - sma40) / sma40 * 100 if sma40 > 0 else 999.0
     s100 = float(dd['SMA100'].iloc[-1]); s200 = float(dd['SMA200'].iloc[-1])
     en_piso = (abs(precio - s100) / s100 <= 0.02) or (abs(precio - s200) / s200 <= 0.02)
     zona = "En Piso Fuerte" if en_piso else "Fuera de Piso"
     canal_h, _ = detectar_canal_bajista(dh)
 
     fired = {}
-    if abierto and estrategia_primera_vela_roja(d30, ahora) and not en_piso:
+    if abierto and estrategia_primera_vela_roja(d30, ahora) and not en_piso and dist40 >= 0.5:
         fired["Primera Vela Roja"] = True
-    if estrategia_ruptura_piso_gap(dh):
+    if estrategia_ruptura_piso_gap(dh) and dist40 >= 0.5:
         fired["Ruptura Piso del Gap"] = True
     if estrategia_modelo_4_pasos(dh):
         fired["Modelo 4 Pasos"] = True
@@ -443,7 +569,7 @@ def analizar_activo(ticker, ahora):
     ca, tipo_caida = estrategia_caida(dd, dh)
     if ca:
         fired[tipo_caida] = True
-    if estrategia_primer_gap(dd, dh):
+    if estrategia_primer_gap(dd, dh, ticker):
         fired["Primer Gap al Alza"] = True
 
     estrategia_sel = "Sin Estrategia Clara"
@@ -468,7 +594,7 @@ def analizar_activo(ticker, ahora):
     else:
         val = "Esperar confirmacion"
 
-    opc = obtener_datos_opciones(stock, precio) or {
+    opc = obtener_datos_opciones(stock, precio, ticker) or {
         'venc': 'N/A', 'strike_call': 'N/A', 'call_ask': 'N/A', 'call_bid': 'N/A', 'call_iv': 'N/A',
         'strike_put': 'N/A', 'put_ask': 'N/A', 'put_bid': 'N/A', 'put_iv': 'N/A'}
 
@@ -497,26 +623,37 @@ def analizar_activo(ticker, ahora):
     }
 
 # ==========================================
-# SHEETS
+# SHEETS (escritura segura)
 # ==========================================
+
+def escribir_hoja_segura(ws, tabla, nombre):
+    """Prepara la tabla antes de tocar la hoja; reintenta; nunca la deja vacia."""
+    for intento in (1, 2, 3):
+        try:
+            ws.resize(rows=len(tabla), cols=len(tabla[0]))
+            ws.update(tabla)
+            print('Hoja ' + nombre + ' escrita: ' + str(len(tabla) - 1) + ' filas')
+            return True
+        except Exception as e:
+            registrar_error('escribir_hoja_segura', nombre, 'intento ' + str(intento), e)
+            time.sleep(2)
+    return False
 
 def guardar_radar(resultados):
     try:
         sh = gc.open_by_key(SPREADSHEET_ID)
         ws = sh.sheet1
-        ws.clear()
         headers = ['Ticker', 'Fecha_Hora_Escaneo', 'Precio Spot', 'Tendencia 1H', 'SMA 40 (1H)',
                    'Estrategia Cardona', 'Condicion 1: Tendencia', 'Condicion 2: Distancia PM40',
                    'Condicion 3: Zona Diario', 'Validación Humana', 'Vencimiento', 'Strike Call OTM',
                    'Call Ask ($)', 'Call Bid ($)', 'Call Estado', 'Strike Put OTM', 'Put Ask ($)',
                    'Put Bid ($)', 'Put Estado']
-        ws.append_row(headers)
-        for r in resultados:
-            ws.append_row([r[h] for h in headers])
-        print("Radar guardado: " + str(len(resultados)))
-        return sh
+        tabla = [headers] + [[r[h] for h in headers] for r in resultados]
+        if escribir_hoja_segura(ws, tabla, 'radar'):
+            return sh
+        return None
     except Exception as e:
-        print("Error guardando radar: " + str(e))
+        registrar_error('guardar_radar', 'sheet', 'apertura/escritura', e)
         return None
 
 def abrir_simulador(sh):
@@ -530,18 +667,13 @@ def abrir_simulador(sh):
 def leer_simulador(ws):
     try:
         return [dict(f) for f in ws.get_all_records()]
-    except Exception:
+    except Exception as e:
+        registrar_error('leer_simulador', 'SIMULADOR', 'lectura', e)
         return []
 
 def escribir_simulador(ws, filas):
-    try:
-        ws.clear()
-        ws.append_row(SIM_HEADERS)
-        for f in filas:
-            ws.append_row([str(f.get(h, '')) for h in SIM_HEADERS])
-        print("Simulador guardado: " + str(len(filas)))
-    except Exception as e:
-        print("Error guardando simulador: " + str(e))
+    tabla = [SIM_HEADERS] + [[str(f.get(h, '')) for h in SIM_HEADERS] for f in filas]
+    return escribir_hoja_segura(ws, tabla, 'SIMULADOR')
 
 # ==========================================
 # MAIN
@@ -549,13 +681,25 @@ def escribir_simulador(ws, filas):
 
 def main():
     ahora = datetime.now(NY_TZ)
+    print("=" * 60)
+    print("METODO CARDONA " + VERSION + " - " + ahora.strftime('%Y-%m-%d %H:%M:%S') + " NY")
+    print("MODO SIMULACION - NO SE ENVIAN ORDENES REALES")
     key_gemini = os.environ.get('GEMINI_API_KEY', '')
     dia_fomc = ahora.strftime('%Y-%m-%d') in FOMC_2026
-    print("=" * 60)
-    print("METODO CARDONA v11 - " + ahora.strftime('%Y-%m-%d %H:%M:%S') + " NY")
     if dia_fomc:
-        print("HOY ES REUNION FOMC: sin compras nuevas (Regla 8)")
+        print("HOY ES REUNION FOMC: sin compras nuevas; ganancias se cierran (Regla 8)")
+    fuerza = os.environ.get('FUERZA', '0') == '1'
+    if not fuerza and not es_hora_de_escaneo(ahora):
+        print("Fuera de ventana de escaneo NY; sin cambios en el Sheet.")
+        print("=" * 60)
+        return
     print("=" * 60)
+
+    try:
+        conectar_sheets()
+    except Exception as e:
+        registrar_error('main', 'sheets', 'autenticacion', e)
+        raise
 
     sh0 = gc.open_by_key(SPREADSHEET_ID)
     ws_sim = abrir_simulador(sh0)
@@ -567,6 +711,18 @@ def main():
     abiertas = [f for f in filas if str(f.get('Estado', '')) == 'ABIERTA']
     tickers_con_pos = set(str(f.get('Simbolo', '')) for f in abiertas)
     contratos = sum(int(float(f.get('Cantidad', 1) or 1)) for f in abiertas)
+
+    lunes = ahora.date() - timedelta(days=ahora.weekday())
+    compras_semana = set()
+    for f in filas:
+        if str(f.get('NOM', '')) == 'AUTOPILOTO':
+            try:
+                fd = datetime.strptime(str(f.get('Fecha', '')), '%Y-%m-%d').date()
+            except Exception:
+                continue
+            if fd >= lunes:
+                compras_semana.add((str(f.get('Fecha', '')), str(f.get('Hora', '')), str(f.get('Simbolo', ''))))
+
     resultados = []
     cache_cadenas = {}
 
@@ -575,82 +731,67 @@ def main():
         if r is not None:
             resultados.append(r)
 
-        # ============ VENTAS (blindadas: corren aunque r sea None) ============
+        # ============ VENTAS ============
         for f in filas:
             if str(f.get('Estado', '')) != 'ABIERTA' or str(f.get('Simbolo', '')) != ticker:
+                continue
+            if cerrar_si_vencida(f, ahora):
                 continue
             clave = (ticker, str(f.get('F. Exp', '')))
             if clave not in cache_cadenas:
                 try:
                     cache_cadenas[clave] = yf.Ticker(ticker).option_chain(clave[1])
-                except Exception:
+                except Exception as e:
+                    registrar_error('main', ticker, 'cadena para venta ' + clave[1], e)
                     cache_cadenas[clave] = None
             chain = cache_cadenas[clave]
-            if chain is None:
-                continue
-            bid = bid_de_cadena(chain, f.get('Strike'), str(f.get('Call/Put', '')))
-            f['Bid Actual'] = bid
+            bid = bid_de_cadena(chain, f.get('Strike'), str(f.get('Call/Put', ''))) if chain is not None else 0.0
+            if bid > 0:
+                f['Bid Actual'] = bid
+            try: bid_usar = float(f.get('Bid Actual', 0) or 0)
+            except Exception: bid_usar = 0.0
+            if bid > 0:
+                bid_usar = bid
             try: compra = float(f.get('Precio Compra', 0) or 0)
             except Exception: compra = 0.0
             try: maxbid = float(f.get('Max Bid', 0) or 0)
             except Exception: maxbid = 0.0
-            maxbid = max(maxbid, bid)
-            f['Max Bid'] = maxbid
+            if bid > 0:
+                maxbid = max(maxbid, bid)
+                f['Max Bid'] = maxbid
             try: limit = float(f.get('Precio Limit', 0) or 0)
             except Exception: limit = 0.0
             try: fprog = datetime.strptime(str(f.get('Fecha Venta Prog', '')), '%Y-%m-%d').date()
             except Exception: fprog = ahora.date()
             hoy = ahora.date()
-
-            # Limpieza: expiro sin valor
-            if hoy > fprog and bid <= 0:
-                cerrar_fila(f, 0.0, str(hoy), 'expiro sin valor (limpieza)')
-                print("VENTA limpieza expirada: " + ticker)
+            if compra <= 0:
                 continue
-            if bid <= 0 or compra <= 0:
-                continue
-
             tag = str(f.get('Notas', ''))
             lado = str(f.get('Call/Put', ''))
 
-            if 'corredor' in tag:
-                reversion = False
-                if r is not None:
-                    if lado == 'CALL':
-                        reversion = (r['Tendencia 1H'] == 'Bajista') or (r['Put Estado'] == 'VIABLE')
-                    else:
-                        reversion = (r['Tendencia 1H'] == 'Alcista') or (r['Call Estado'] == 'VIABLE')
-                proteccion = (maxbid >= compra * 3.0) and (bid <= compra * 2.0)
-                ia_vender, razon = (None, '')
-                if ahora.hour >= 15 and key_gemini:
-                    ia_vender, razon = revision_ia(f, key_gemini)
-                if reversion:
-                    cerrar_fila(f, bid, str(hoy), 'puerta 1: reversion Cardona')
-                    print("VENTA P1 reversion: " + ticker)
-                elif proteccion:
-                    cerrar_fila(f, bid, str(hoy), 'puerta 2: proteccion de ganancia')
-                    print("VENTA P2 proteccion: " + ticker)
-                elif ia_vender == 'VENDER':
-                    cerrar_fila(f, bid, str(hoy), 'puerta 3: IA (' + razon + ')')
-                    print("VENTA P3 IA: " + ticker)
-                elif hoy > fprog:
-                    cerrar_fila(f, bid, str(hoy), 'puerta 4: venta tardia')
-                    print("VENTA P4 tardia: " + ticker)
-                elif hoy == fprog and ahora.hour >= 15:
-                    cerrar_fila(f, bid, str(hoy), 'puerta 4: viernes en la tarde')
-                    print("VENTA P4 viernes tarde: " + ticker)
-            else:
-                if limit > 0 and bid >= limit:
-                    cerrar_fila(f, bid, str(hoy), 'venta auto +100%')
-                    print("VENTA +100%: " + ticker)
-                elif hoy > fprog:
-                    cerrar_fila(f, bid, str(hoy), 'venta tardia')
-                    print("VENTA tardia: " + ticker)
-                elif hoy == fprog and ahora.hour >= 15:
-                    cerrar_fila(f, bid, str(hoy), 'venta viernes en la tarde')
-                    print("VENTA viernes tarde: " + ticker)
+            if dia_fomc and bid_usar > 0 and bid_usar >= compra:
+                cerrar_fila(f, bid_usar, str(hoy), 'FOMC: ganancia cerrada antes de la reunion')
+                print("VENTA FOMC ganancia: " + ticker)
+                continue
 
-        # ============ COMPRAS (requieren radar OK) ============
+            reversion = False
+            if r is not None and 'corredor' in tag:
+                if lado == 'CALL':
+                    reversion = (r['Tendencia 1H'] == 'Bajista') or (r['Put Estado'] == 'VIABLE')
+                else:
+                    reversion = (r['Tendencia 1H'] == 'Alcista') or (r['Call Estado'] == 'VIABLE')
+            ia_vender, razon = (None, '')
+            if 'corredor' in tag and ahora.hour >= 15 and key_gemini:
+                ia_vender, razon = revision_ia(f, key_gemini)
+
+            cerrar, nota = decidir_venta(tag, lado, bid_usar, compra, maxbid, limit, hoy, fprog, ahora.hour, reversion, ia_vender)
+            if cerrar:
+                if nota == 'puerta 3: IA':
+                    nota = 'puerta 3: IA (' + razon + ')'
+                cerrar_fila(f, bid_usar, str(hoy), nota)
+                print("VENTA (" + nota + "): " + ticker)
+
+        # ============ COMPRAS ============
         if r is None:
             time.sleep(1); continue
         lado = r['Lado Sugerido'] if r['Lado Sugerido'] != 'NINGUNO' else None
@@ -667,6 +808,8 @@ def main():
             time.sleep(1); continue
         if dia_fomc:
             time.sleep(1); continue
+        if len(compras_semana) >= MAX_TRADES_SEMANA:
+            time.sleep(1); continue
         if str(r['Estrategia Cardona']) in pausadas:
             time.sleep(1); continue
         if not hora_entrada_ok(str(r['Estrategia Cardona']), ahora):
@@ -680,10 +823,10 @@ def main():
             print("AUTOPILOTO: " + ticker + " spread ancho, no compra")
             time.sleep(1); continue
 
-        costo = ask * 100.0
+        costo = ask * MULTIPLICADOR
         qty = 2 if costo <= 15.0 else (1 if costo <= MAX_INVERSION else 0)
         if qty == 0:
-            print("AUTOPILOTO: " + ticker + " muy cara, no compra")
+            print("AUTOPILOTO: " + ticker + " fuera de presupuesto del simulador")
             time.sleep(1); continue
         if contratos + qty > MAX_ABIERTAS:
             print("AUTOPILOTO: limite 5 contratos")
@@ -703,7 +846,7 @@ def main():
             filas.append({
                 'NOM': 'AUTOPILOTO', 'Fecha': ahora.strftime('%Y-%m-%d'), 'Hora': ahora.strftime('%H:%M:%S'),
                 'Simbolo': ticker, 'Strike': strike, 'F. Exp': venc, 'Call/Put': lado, 'Cantidad': 1,
-                'Precio Compra': ask, 'Total Inv.': round(costo, 2), 'Precio Limit': lim,
+                'Precio Compra': ask, 'Total Inv.': round(costo + COMISION, 2), 'Precio Limit': lim,
                 'Fecha Venta Prog': fprog.strftime('%Y-%m-%d'), 'Fecha Venta': '', 'Precio Venta': '',
                 'Total Venta': '', 'Ganancia $': '', 'Ganancia %': '', 'Bid Actual': bid0, 'Max Bid': bid0,
                 'Estrategia': r['Estrategia Cardona'], 'Estado': 'ABIERTA', 'Notas': nota,
@@ -711,6 +854,7 @@ def main():
             })
         contratos += qty
         tickers_con_pos.add(ticker)
+        compras_semana.add((ahora.strftime('%Y-%m-%d'), ahora.strftime('%H:%M:%S'), ticker))
         print("AUTOPILOTO COMPRA: " + ticker + " " + lado + " (" + r['Estrategia Cardona'] + ") strike " + str(strike) + " x" + str(qty))
         time.sleep(1)
 
@@ -721,6 +865,7 @@ def main():
     print("=" * 60)
     for r in resultados:
         print(r['Ticker'] + " | " + r['Estrategia Cardona'] + " | LADO " + r['Lado Sugerido'])
+    print("MODO SIMULACION - NO SE ENVIAN ORDENES REALES")
     print("=" * 60)
 
 if __name__ == '__main__':
