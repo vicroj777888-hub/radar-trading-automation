@@ -44,7 +44,7 @@ META_GAIN = 2.0
 COMISION = float(os.environ.get('COMISION_USD', '0.0'))
 MIN_ASK = 0.05
 MULTIPLICADOR = 100.0
-MODELOS = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-flash-latest']
+MODELOS = ['gemini-3.6-flash', 'gemini-3.6-flash', 'gemini-flash-latest', 'gemini-flash-latest']
 
 OBJETIVOS_ESCANEO = [(9, 31), (10, 1), (11, 1), (12, 1), (13, 1), (14, 1), (15, 1), (15, 58), (16, 5)]
 
