@@ -38,7 +38,7 @@ MAX_INVERSION = 30.0
 MAX_ABIERTAS = 5
 META_GAIN = 2.0
 COMISION = 0.0
-MODELOS = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-flash-latest']
+MODELOS = ['gemini-3.6-flash', 'gemini-3.6-flash', 'gemini-flash-latest', 'gemini-flash-latest']
 
 SCAN_TIMES = [(9, 31), (10, 1), (11, 1), (12, 1), (13, 1), (14, 1), (15, 1), (15, 58)]
 
