@@ -1,6 +1,7 @@
 # ==========================================
 # RADAR DE FRANCOTIRADOR - DSS TRADING
-# app.py - VERSION v7 (auto-refresco + escaneos faltantes automaticos)
+# app.py - VERSION v8 (informe IA con diagnostico real)
+# MODO SIMULACION - NO SE ENVIAN ORDENES REALES
 # Repo unico: radar-trading-automation
 # ==========================================
 
@@ -196,7 +197,7 @@ def gan_pct_viva(row):
     return 0.0
 
 # ==========================================
-# GEMINI (informe semanal con memoria y GUIA)
+# GEMINI: INFORME CON DIAGNOSTICO REAL
 # ==========================================
 
 def limpiar_json(txt):
@@ -208,28 +209,64 @@ def limpiar_json(txt):
             txt = txt[4:]
     return txt.strip()
 
+def sanear(txt, key):
+    """Quita la clave de cualquier mensaje antes de mostrarlo."""
+    out = str(txt)
+    if key:
+        out = out.replace(key, '***')
+    return out[:300]
+
 def informe_gemini(cerradas, lecciones_previas, key):
+    """Devuelve {'ok', 'motivo', 'diagnosticos', 'datos'}. Nunca imprime la clave."""
+    diag = []
+    if not key:
+        return {'ok': False, 'motivo': 'Falta GEMINI_API_KEY en Secrets de Streamlit', 'diagnosticos': diag, 'datos': None}
+
     lineas = []
     for f in cerradas:
-        lineas.append(
-            str(f.get('Simbolo')) + ' ' + str(f.get('Call/Put')) + ' | ' +
-            str(f.get('Estrategia')) + ' | compra ' + str(f.get('Precio Compra')) +
-            ' | venta ' + str(f.get('Precio Venta')) + ' | ' + str(f.get('Ganancia %')) +
-            '% | ' + str(f.get('Notas'))
-        )
+        partes = [
+            'entrada ' + str(f.get('Fecha', '')) + ' ' + str(f.get('Hora', '')),
+            'cierre ' + str(f.get('Fecha Venta', '')),
+            str(f.get('Simbolo')) + ' ' + str(f.get('Call/Put')),
+            'strike ' + str(f.get('Strike')),
+            'exp ' + str(f.get('F. Exp')),
+            'estrategia ' + str(f.get('Estrategia')),
+            'compra ' + str(f.get('Precio Compra')),
+            'venta ' + str(f.get('Precio Venta')),
+            'bid ' + str(f.get('Bid Actual')),
+            'bid_max ' + str(f.get('Max Bid')),
+            'gan$ ' + str(f.get('Ganancia $')),
+            'gan% ' + str(f.get('Ganancia %')),
+            'motivo_cierre ' + str(f.get('Notas', '')),
+            'estado ' + str(f.get('Estado', '')),
+        ]
+        lineas.append(' | '.join(partes))
+
     prompt = "GUIA OFICIAL DEL METODO CARDONA:\n" + GUIA_CARDONA + "\n\n"
-    prompt += "OPERACIONES CERRADAS DEL SIMULADOR:\n" + "\n".join(lineas) + "\n\n"
+    prompt += "OPERACIONES CERRADAS DEL PAPER TRADING (todos los campos disponibles):\n" + "\n".join(lineas) + "\n\n"
     prompt += "LECCIONES DE SEMANAS ANTERIORES:\n" + (lecciones_previas or 'ninguna aun') + "\n\n"
-    prompt += """Analiza el desempeno CONTRA LA GUIA: que estrategias ganan, cuales pierden,
-y si alguna operacion violo una regla de la GUIA (horario, zona, tendencia).
+    prompt += """Analiza CADA operacion y el conjunto contra la GUIA. Determina:
+- que estrategias funcionaron y cuales fallaron;
+- que reglas de la GUIA se cumplieron y cuales se incumplieron;
+- si la entrada fue correcta (horario, zona, tendencia, vela formada);
+- si la salida fue correcta (limit +100%, viernes en la tarde, puertas, vencimiento);
+- si hubo vencimientos sin valor;
+- que condiciones existian al abrir la posicion y que ocurrio durante la operacion;
+- que debe verificarse antes de repetir cada estrategia.
+NO modifiques estrategias: produce unicamente recomendaciones para revision humana.
 Responde UNICAMENTE con este JSON valido, en espanol:
 {
- "resumen": "resumen de 3-4 frases del desempeno total",
- "win_rate_por_estrategia": {"nombre estrategia": "porcentaje de aciertos"},
- "reglas_violadas": ["reglas de la GUIA que se violaron, si hubo"],
- "lecciones": ["lecciones nuevas, cortas y accionables"],
- "recomendaciones": ["ajustes concretos de reglas para la proxima semana"]
+ "resumen": "...",
+ "win_rate_por_estrategia": {"estrategia": "porcentaje"},
+ "reglas_violadas": ["..."],
+ "lecciones": ["..."],
+ "recomendaciones": ["..."],
+ "entradas_correctas": ["..."],
+ "salidas_correctas": ["..."],
+ "vencimientos_sin_valor": ["..."],
+ "verificar_antes_de_repetir": ["..."]
 }"""
+
     for modelo in MODELOS:
         url = 'https://generativelanguage.googleapis.com/v1beta/models/' + modelo + ':generateContent?key=' + key
         body = {
@@ -237,14 +274,44 @@ Responde UNICAMENTE con este JSON valido, en espanol:
             'generationConfig': {'temperature': 0.4, 'responseMimeType': 'application/json'}
         }
         try:
-            r = requests.post(url, json=body, timeout=60)
-            if r.status_code == 200:
-                txt = r.json()['candidates'][0]['content']['parts'][0]['text']
-                return json.loads(limpiar_json(txt))
-        except Exception:
-            pass
-        time.sleep(2)
-    return None
+            r = requests.post(url, json=body, timeout=90)
+        except Exception as e:
+            diag.append(modelo + ': error de red ' + type(e).__name__ + ' ' + sanear(e, key))
+            time.sleep(2)
+            continue
+        if r.status_code == 429:
+            diag.append(modelo + ': HTTP 429 limite de uso alcanzado, espera unos minutos')
+            time.sleep(2)
+            continue
+        if r.status_code in (400, 401, 403):
+            diag.append(modelo + ': HTTP ' + str(r.status_code) + ' (clave invalida o sin permiso) ' + sanear(r.text, key))
+            time.sleep(2)
+            continue
+        if r.status_code != 200:
+            diag.append(modelo + ': HTTP ' + str(r.status_code) + ' ' + sanear(r.text, key))
+            time.sleep(2)
+            continue
+        try:
+            txt = r.json()['candidates'][0]['content']['parts'][0]['text']
+        except Exception as e:
+            diag.append(modelo + ': respuesta sin contenido util (' + type(e).__name__ + ')')
+            time.sleep(2)
+            continue
+        try:
+            ia = json.loads(limpiar_json(txt))
+        except Exception as e:
+            diag.append(modelo + ': JSON invalido (' + type(e).__name__ + ') inicio: ' + sanear(limpiar_json(txt)[:200], key))
+            time.sleep(2)
+            continue
+        faltan = [k for k in ('resumen', 'win_rate_por_estrategia', 'reglas_violadas', 'lecciones', 'recomendaciones') if k not in ia]
+        if faltan:
+            diag.append(modelo + ': JSON sin claves obligatorias: ' + ', '.join(faltan))
+            time.sleep(2)
+            continue
+        return {'ok': True, 'motivo': '', 'diagnosticos': diag, 'datos': ia}
+
+    motivo = ('Gemini fallo en todos los modelos. ' + ' || '.join(diag)) if diag else 'Gemini fallo en todos los modelos.'
+    return {'ok': False, 'motivo': motivo, 'diagnosticos': diag, 'datos': None}
 
 # ==========================================
 # CARGA DE DATOS DEL RADAR
@@ -289,7 +356,6 @@ def lanzar_dispatch():
     urllib.request.urlopen(req)
 
 def auto_dispatch_faltante():
-    """Si el escaneo de la hora Cardona que ya paso no esta en el Sheet, lo lanza solo"""
     ahora = datetime.now(ZONA_NY)
     if ahora.weekday() > 4:
         return
@@ -901,9 +967,7 @@ else:
 
 st.subheader("Informe semanal de la IA (aprendizaje con la GUIA)")
 if st.button("Generar informe semanal con IA"):
-    if not KEY_G:
-        st.warning("Falta GEMINI_API_KEY en Secrets.")
-    elif not cerradas:
+    if not cerradas:
         st.info("Aun no hay operaciones cerradas para analizar.")
     else:
         with st.spinner("Gemini analizando el historial contra la GUIA..."):
@@ -912,25 +976,30 @@ if st.button("Generar informe semanal con IA"):
             if ws_ia is not None:
                 try:
                     regs = ws_ia.get_all_records()
-                    lecciones_previas = " | ".join([str(x.get('Lecciones', '')) for x in regs][-5:])
+                    lecciones_previas = " | ".join([str(x.get('Lecciones', '')) for x in regs if x.get('Lecciones')][-5:])
                 except Exception:
                     lecciones_previas = ''
-            ia = informe_gemini(cerradas, lecciones_previas, KEY_G)
-        if ia:
+            res = informe_gemini(cerradas, lecciones_previas, KEY_G)
+        if res['ok']:
+            ia = res['datos']
             st.markdown("**Resumen:** " + str(ia.get('resumen', '')))
             st.markdown("**Win rate por estrategia:**")
             st.json(ia.get('win_rate_por_estrategia', {}))
-            rv = ia.get('reglas_violadas', [])
-            if rv:
-                st.markdown("**Reglas de la GUIA violadas:**")
-                for e in rv:
-                    st.markdown("- " + str(e))
-            st.markdown("**Lecciones (memoria del sistema):**")
-            for e in ia.get('lecciones', []):
-                st.markdown("- " + str(e))
-            st.markdown("**Recomendaciones para la proxima semana:**")
-            for e in ia.get('recomendaciones', []):
-                st.markdown("- " + str(e))
+            secciones = [
+                ("Reglas de la GUIA violadas", 'reglas_violadas'),
+                ("Entradas correctas", 'entradas_correctas'),
+                ("Salidas correctas", 'salidas_correctas'),
+                ("Vencimientos sin valor", 'vencimientos_sin_valor'),
+                ("Verificar antes de repetir", 'verificar_antes_de_repetir'),
+                ("Lecciones (memoria del sistema)", 'lecciones'),
+                ("Recomendaciones para revision humana", 'recomendaciones'),
+            ]
+            for titulo, clave in secciones:
+                items = ia.get(clave, [])
+                if items:
+                    st.markdown("**" + titulo + ":**")
+                    for e in items:
+                        st.markdown("- " + str(e))
             if ws_ia is not None:
                 try:
                     ws_ia.append_row([
@@ -939,7 +1008,20 @@ if st.button("Generar informe semanal con IA"):
                         " | ".join([str(x) for x in ia.get('lecciones', [])]),
                         " | ".join([str(x) for x in ia.get('recomendaciones', [])])
                     ])
+                    st.caption("Informe guardado en INFORME_IA (solo se agrega; nada se borra).")
+                except Exception as e:
+                    st.warning("No se pudo guardar el informe en el Sheet: " + str(e))
+        else:
+            st.error("El informe fallo: " + res['motivo'])
+            for d in res['diagnosticos']:
+                st.caption(d)
+            if ws_ia is not None:
+                try:
+                    ws_ia.append_row([
+                        datetime.now(ZONA_NY).strftime('%Y-%m-%d %H:%M'),
+                        'INFORME FALLIDO: ' + res['motivo'][:400],
+                        '', ''
+                    ])
+                    st.caption("Fallo registrado en INFORME_IA; los informes anteriores quedan intactos.")
                 except Exception:
                     pass
-        else:
-            st.error("Gemini no respondio. Revisa la clave o intenta mas tarde.")
