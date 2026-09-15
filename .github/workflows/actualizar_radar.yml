@@ -1,7 +1,8 @@
 name: Actualizar Radar Trading
 
-# GitHub cron solo acepta UTC: este cron cubre 13-21 UTC (verano e invierno)
-# y main.py decide en America/New_York si es ventana de escaneo.
+# El cron de GitHub solo acepta UTC: 13-21 UTC cubre las ventanas
+# de Nueva York en horario de verano Y de invierno.
+# main.py decide (es_hora_de_escaneo) si actua o sale en segundos.
 on:
   schedule:
     - cron: '1,5,31,58 13-21 * * 1-5'
