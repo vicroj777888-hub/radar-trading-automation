@@ -1,11 +1,10 @@
 name: Actualizar Radar Trading
 
+# GitHub cron solo acepta UTC: este cron cubre 13-21 UTC (verano e invierno)
+# y main.py decide en America/New_York si es ventana de escaneo.
 on:
   schedule:
-    - cron: '31 13 * * 1-5'
-    - cron: '1 14-20 * * 1-5'
-    - cron: '58 19 * * 1-5'
-    - cron: '58 20 * * 1-5'
+    - cron: '1,5,31,58 13-21 * * 1-5'
   workflow_dispatch:
 
 concurrency:
@@ -16,12 +15,14 @@ jobs:
   maquina_1:
     runs-on: ubuntu-latest
     timeout-minutes: 12
+    env:
+      FUERZA: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      - run: pip install yfinance pandas numpy gspread google-auth tzdata requests
+      - run: pip install -r requirements.txt
       - name: Ejecutar
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
@@ -34,12 +35,14 @@ jobs:
     if: ${{ failure() }}
     runs-on: ubuntu-22.04
     timeout-minutes: 12
+    env:
+      FUERZA: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      - run: pip install yfinance pandas numpy gspread google-auth tzdata requests
+      - run: pip install -r requirements.txt
       - name: Ejecutar
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
@@ -52,12 +55,14 @@ jobs:
     if: ${{ failure() }}
     runs-on: windows-latest
     timeout-minutes: 12
+    env:
+      FUERZA: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      - run: pip install yfinance pandas numpy gspread google-auth tzdata requests
+      - run: pip install -r requirements.txt
       - name: Ejecutar
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
