@@ -1,7 +1,7 @@
 # ==========================================
-# METODO CARDONA - main.py v15
+# METODO CARDONA - main.py v16
 # MODO SIMULACION - NO SE ENVIAN ORDENES REALES
-# Cierres por vencimiento blindados, zoneinfo, escrituras seguras
+# Opcion A: puerta 1 solo alerta; cero cierres con perdida antes del viernes
 # Repo unico: radar-trading-automation
 # ==========================================
 
@@ -17,7 +17,7 @@ import time
 import requests
 from zoneinfo import ZoneInfo
 
-VERSION = 'v15'
+VERSION = 'v16'
 NY_TZ = ZoneInfo('America/New_York')
 
 SCOPES = [
@@ -107,7 +107,6 @@ def registrar_error(funcion, simbolo, operacion, error):
 # ==========================================
 
 def normalizar_ny(df):
-    """Convierte el indice de Yahoo (UTC o naive) a America/New_York"""
     out = df.copy()
     idx = out.index
     if getattr(idx, 'tz', None) is None:
@@ -128,9 +127,8 @@ def obtener_datos(ticker):
         datos_diarios['SMA100'] = datos_diarios['Close'].rolling(100).mean()
         datos_diarios['SMA200'] = datos_diarios['Close'].rolling(200).mean()
         datos_horarios = normalizar_ny(datos_horarios)
-        datos_30m = normalizar_ny(datos_30m) if datos_30m is not None and not datos_30m.empty else datos_30m
         if datos_30m is not None and not datos_30m.empty:
-            datos_30m = datos_30m
+            datos_30m = normalizar_ny(datos_30m)
         datos_horarios['SMA20'] = datos_horarios['Close'].rolling(20).mean()
         datos_horarios['SMA40'] = datos_horarios['Close'].rolling(40).mean()
         return datos_diarios, datos_horarios, datos_30m, stock
@@ -339,7 +337,6 @@ def estrategia_piso_fuerte(dd, dh):
     return es_vela_verde_fuerte(u) and float(u['Close']) > techo
 
 def estrategia_primer_gap(dd, dh, ticker):
-    """Exige gap real: apertura de hoy > cierre de ayer (velas horarias NY)"""
     hoy = velas_de_hoy(dh)
     if len(dd) < 200 or len(hoy) < 1:
         return False
@@ -439,7 +436,6 @@ def cerrar_fila(row, bid, hoy_str, nota):
     row['Notas'] = str(row.get('Notas', '')) + ' | ' + nota
 
 def cerrar_si_vencida(row, ahora):
-    """Cierra con F. Exp (fecha real). Devuelve True si cerro la fila."""
     if str(row.get('Estado', '')) != 'ABIERTA':
         return False
     raw = str(row.get('F. Exp', '')).strip()
@@ -464,12 +460,10 @@ def cerrar_si_vencida(row, ahora):
     print('CIERRE POR VENCIMIENTO: ' + str(row.get('Simbolo', '')) + ' F.Exp ' + raw + ' -> ' + nota)
     return True
 
-def decidir_venta(tag, lado, bid_usar, compra, maxbid, limit, hoy, fprog, hora, reversion, ia_vender):
-    """Devuelve (cerrar, nota). Logica pura y probable."""
+def decidir_venta(tag, lado, bid_usar, compra, maxbid, limit, hoy, fprog, hora, ia_vender):
+    """v16: sin puerta 1 de cierre. Devuelve (cerrar, nota)."""
     if 'corredor' in tag:
-        if reversion:
-            return True, 'puerta 1: reversion Cardona'
-        if compra > 0 and maxbid >= compra * 3.0 and bid_usar <= compra * 2.0:
+        if compra > 0 and maxbid >= compra * 3.0 and bid_usar <= compra * 2.0 and bid_usar >= compra:
             return True, 'puerta 2: proteccion de ganancia'
         if ia_vender == 'VENDER':
             return True, 'puerta 3: IA'
@@ -488,7 +482,7 @@ def decidir_venta(tag, lado, bid_usar, compra, maxbid, limit, hoy, fprog, hora, 
         return False, ''
 
 # ==========================================
-# IA CON GUIA
+# IA CON GUIA (prompt capado anti-stop-loss)
 # ==========================================
 
 def limpiar_json(txt):
@@ -510,7 +504,10 @@ def revision_ia(f, key):
               "POSICION ABIERTA: " + str(f.get('Simbolo')) + " " + str(f.get('Call/Put')) +
               " strike " + str(f.get('Strike')) + ", compra " + str(compra) + ", bid " + str(bid) +
               ", ganancia " + str(gan) + "%, estrategia " + str(f.get('Estrategia')) +
-              ". Segun la GUIA, ¿la tesis sigue vigente o se rompieron sus condiciones?" +
+              ". PROHIBIDO recomendar VENDER por porcentaje de perdida, stop loss, miedo o subjetividad." +
+              " Solo puedes responder VENDER si la tesis de la estrategia se rompio segun la GUIA" +
+              " (condiciones de la estrategia invalidadas) o si la posicion esta en ganancia y la GUIA ordena salir" +
+              " (utilidad grande en apertura, viernes, antes de expiracion ITM, FOMC con ganancia)." +
               " Responde SOLO JSON: {\"decision\": \"VENDER\" o \"MANTENER\", \"razon\": \"frase corta\"}")
     for modelo in MODELOS:
         url = 'https://generativelanguage.googleapis.com/v1beta/models/' + modelo + ':generateContent?key=' + key
@@ -521,7 +518,7 @@ def revision_ia(f, key):
             if r.status_code == 200:
                 d = json.loads(limpiar_json(r.json()['candidates'][0]['content']['parts'][0]['text']))
                 return str(d.get('decision', '')).upper(), str(d.get('razon', ''))
-            registrar_error('revision_ia', str(f.get('Simbolo', '')), 'respuesta HTTP ' + str(r.status_code) + ' modelo ' + modelo, RuntimeError('HTTP ' + str(r.status_code)))
+            registrar_error('revision_ia', str(f.get('Simbolo', '')), 'HTTP ' + str(r.status_code) + ' modelo ' + modelo, RuntimeError('HTTP ' + str(r.status_code)))
         except Exception as e:
             registrar_error('revision_ia', str(f.get('Simbolo', '')), 'llamada modelo ' + modelo, e)
         time.sleep(1)
@@ -627,7 +624,6 @@ def analizar_activo(ticker, ahora):
 # ==========================================
 
 def escribir_hoja_segura(ws, tabla, nombre):
-    """Prepara la tabla antes de tocar la hoja; reintenta; nunca la deja vacia."""
     for intento in (1, 2, 3):
         try:
             ws.resize(rows=len(tabla), cols=len(tabla[0]))
@@ -731,7 +727,7 @@ def main():
         if r is not None:
             resultados.append(r)
 
-        # ============ VENTAS ============
+        # ============ VENTAS (v16: cero cierres con perdida antes del viernes) ============
         for f in filas:
             if str(f.get('Estado', '')) != 'ABIERTA' or str(f.get('Simbolo', '')) != ticker:
                 continue
@@ -774,17 +770,28 @@ def main():
                 print("VENTA FOMC ganancia: " + ticker)
                 continue
 
-            reversion = False
-            if r is not None and 'corredor' in tag:
-                if lado == 'CALL':
-                    reversion = (r['Tendencia 1H'] == 'Bajista') or (r['Put Estado'] == 'VIABLE')
-                else:
-                    reversion = (r['Tendencia 1H'] == 'Alcista') or (r['Call Estado'] == 'VIABLE')
-            ia_vender, razon = (None, '')
-            if 'corredor' in tag and ahora.hour >= 15 and key_gemini:
-                ia_vender, razon = revision_ia(f, key_gemini)
+            # Puerta 1 (v16): SOLO ALERTA registrada, nunca vende (Regla 3 y 1.a.viii)
+            if 'corredor' in tag:
+                reversion = False
+                if r is not None:
+                    if lado == 'CALL':
+                        reversion = (r['Tendencia 1H'] == 'Bajista') or (r['Put Estado'] == 'VIABLE')
+                    else:
+                        reversion = (r['Tendencia 1H'] == 'Alcista') or (r['Call Estado'] == 'VIABLE')
+                if reversion and 'alerta reversion' not in str(f.get('Notas', '')):
+                    f['Notas'] = str(f.get('Notas', '')) + ' | alerta reversion: ' + ahora.strftime('%Y-%m-%d %H:%M')
+                    print("ALERTA REVERSION (no se vende, Regla 3): " + ticker)
 
-            cerrar, nota = decidir_venta(tag, lado, bid_usar, compra, maxbid, limit, hoy, fprog, ahora.hour, reversion, ia_vender)
+            # Puerta 3: IA solo con precio fresco; guard anti-stop-loss en codigo
+            ia_vender, razon = (None, '')
+            if 'corredor' in tag and chain is not None and bid > 0 and ahora.hour >= 15 and key_gemini:
+                ia_vender, razon = revision_ia(f, key_gemini)
+            if ia_vender == 'VENDER' and bid_usar < compra:
+                print("IA IGNORADA: no puede cerrar con perdida | " + ticker + " | " + str(razon))
+                f['Notas'] = str(f.get('Notas', '')) + ' | IA ignorada: intento de cierre con perdida'
+                ia_vender = None
+
+            cerrar, nota = decidir_venta(tag, lado, bid_usar, compra, maxbid, limit, hoy, fprog, ahora.hour, ia_vender)
             if cerrar:
                 if nota == 'puerta 3: IA':
                     nota = 'puerta 3: IA (' + razon + ')'
