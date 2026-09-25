@@ -1,7 +1,8 @@
 # ==========================================
-# METODO CARDONA - main.py v16
+# METODO CARDONA - main.py v18
 # MODO SIMULACION - NO SE ENVIAN ORDENES REALES
-# Opcion A: puerta 1 solo alerta; cero cierres con perdida antes del viernes
+# Cierre de viernes a las 15:58 (fin de sesion Cardona)
+# Escritura del SIMULADOR por fusion (nunca borra filas)
 # Repo unico: radar-trading-automation
 # ==========================================
 
@@ -17,7 +18,7 @@ import time
 import requests
 from zoneinfo import ZoneInfo
 
-VERSION = 'v16'
+VERSION = 'v18'
 NY_TZ = ZoneInfo('America/New_York')
 
 SCOPES = [
@@ -46,7 +47,11 @@ MIN_ASK = 0.05
 MULTIPLICADOR = 100.0
 MODELOS = ['gemini-3.6-flash', 'gemini-3.6-flash', 'gemini-flash-latest', 'gemini-flash-latest']
 
-OBJETIVOS_ESCANEO = [(9, 31), (10, 1), (11, 1), (12, 1), (13, 1), (14, 1), (15, 1), (15, 58), (16, 5)]
+# Cierre obligatorio del viernes (Alineado al escaneo final de las 15:58)
+HORA_CIERRE_VIERNES = int(os.environ.get('HORA_CIERRE_VIERNES', '15'))
+MINUTO_CIERRE_VIERNES = int(os.environ.get('MINUTO_CIERRE_VIERNES', '58'))
+
+OBJETIVOS_ESCANEO = [(9, 31), (10, 1), (11, 1), (12, 1), (13, 1), (14, 1), (15, 1), (15, 31), (15, 58), (16, 5)]
 
 RANGOS_ASK = {
     'SPY': (0.25, 0.30), 'QQQ': (0.25, 0.30), 'BAC': (0.10, 0.20), 'SLV': (0.10, 0.20),
@@ -460,8 +465,9 @@ def cerrar_si_vencida(row, ahora):
     print('CIERRE POR VENCIMIENTO: ' + str(row.get('Simbolo', '')) + ' F.Exp ' + raw + ' -> ' + nota)
     return True
 
-def decidir_venta(tag, lado, bid_usar, compra, maxbid, limit, hoy, fprog, hora, ia_vender):
-    """v16: sin puerta 1 de cierre. Devuelve (cerrar, nota)."""
+def decidir_venta(tag, lado, bid_usar, compra, maxbid, limit, hoy, fprog, ahora, ia_vender):
+    """v18: cierre de viernes a las 15:58. Devuelve (cerrar, nota)."""
+    momento_cierre = (ahora.hour, ahora.minute) >= (HORA_CIERRE_VIERNES, MINUTO_CIERRE_VIERNES)
     if 'corredor' in tag:
         if compra > 0 and maxbid >= compra * 3.0 and bid_usar <= compra * 2.0 and bid_usar >= compra:
             return True, 'puerta 2: proteccion de ganancia'
@@ -469,7 +475,7 @@ def decidir_venta(tag, lado, bid_usar, compra, maxbid, limit, hoy, fprog, hora, 
             return True, 'puerta 3: IA'
         if hoy > fprog:
             return True, 'puerta 4: venta tardia'
-        if hoy == fprog and hora >= 15:
+        if hoy == fprog and momento_cierre:
             return True, 'puerta 4: viernes en la tarde'
         return False, ''
     else:
@@ -477,7 +483,7 @@ def decidir_venta(tag, lado, bid_usar, compra, maxbid, limit, hoy, fprog, hora, 
             return True, 'venta auto +100%'
         if hoy > fprog:
             return True, 'venta tardia'
-        if hoy == fprog and hora >= 15:
+        if hoy == fprog and momento_cierre:
             return True, 'venta viernes en la tarde'
         return False, ''
 
@@ -620,7 +626,7 @@ def analizar_activo(ticker, ahora):
     }
 
 # ==========================================
-# SHEETS (escritura segura)
+# SHEETS (escritura segura por fusion)
 # ==========================================
 
 def escribir_hoja_segura(ws, tabla, nombre):
@@ -667,9 +673,45 @@ def leer_simulador(ws):
         registrar_error('leer_simulador', 'SIMULADOR', 'lectura', e)
         return []
 
-def escribir_simulador(ws, filas):
-    tabla = [SIM_HEADERS] + [[str(f.get(h, '')) for h in SIM_HEADERS] for f in filas]
-    return escribir_hoja_segura(ws, tabla, 'SIMULADOR')
+def clave_fila(f):
+    return (str(f.get('NOM', '')), str(f.get('Fecha', '')), str(f.get('Hora', '')),
+            str(f.get('Simbolo', '')), str(f.get('Strike', '')), str(f.get('Call/Put', '')),
+            str(f.get('Precio Limit', '')))
+
+def fusionar_filas(existentes, nuevas):
+    """Union por clave: actualiza coincidentes, agrega nuevas, NUNCA borra."""
+    mapa = {}
+    for f in existentes:
+        mapa[clave_fila(f)] = f
+    for f in nuevas:
+        mapa[clave_fila(f)] = f
+    orden = []
+    vistas = set()
+    for f in existentes:
+        k = clave_fila(f)
+        if k not in vistas:
+            orden.append(mapa[k]); vistas.add(k)
+    for f in nuevas:
+        k = clave_fila(f)
+        if k not in vistas:
+            orden.append(mapa[k]); vistas.add(k)
+    return orden
+
+def escribir_simulador_seguro(ws, filas_propuestas):
+    """Relee la hoja, fusiona por clave y escribe. A prueba de borrados."""
+    for intento in (1, 2, 3):
+        try:
+            existentes = leer_simulador(ws)
+            fusion = fusionar_filas(existentes, filas_propuestas)
+            tabla = [SIM_HEADERS] + [[str(f.get(h, '')) for h in SIM_HEADERS] for f in fusion]
+            ws.resize(rows=len(tabla), cols=len(tabla[0]))
+            ws.update(tabla)
+            print('SIMULADOR escrito por fusion: ' + str(len(fusion)) + ' filas totales')
+            return True
+        except Exception as e:
+            registrar_error('escribir_simulador_seguro', 'SIMULADOR', 'intento ' + str(intento), e)
+            time.sleep(2)
+    return False
 
 # ==========================================
 # MAIN
@@ -727,7 +769,7 @@ def main():
         if r is not None:
             resultados.append(r)
 
-        # ============ VENTAS (v16: cero cierres con perdida antes del viernes) ============
+        # ============ VENTAS (v18: cero cierres con perdida, cierre viernes 15:58) ============
         for f in filas:
             if str(f.get('Estado', '')) != 'ABIERTA' or str(f.get('Simbolo', '')) != ticker:
                 continue
@@ -770,7 +812,7 @@ def main():
                 print("VENTA FOMC ganancia: " + ticker)
                 continue
 
-            # Puerta 1 (v16): SOLO ALERTA registrada, nunca vende (Regla 3 y 1.a.viii)
+            # Puerta 1: SOLO ALERTA registrada, nunca vende (Regla 3 y 1.a.viii)
             if 'corredor' in tag:
                 reversion = False
                 if r is not None:
@@ -791,7 +833,7 @@ def main():
                 f['Notas'] = str(f.get('Notas', '')) + ' | IA ignorada: intento de cierre con perdida'
                 ia_vender = None
 
-            cerrar, nota = decidir_venta(tag, lado, bid_usar, compra, maxbid, limit, hoy, fprog, ahora.hour, ia_vender)
+            cerrar, nota = decidir_venta(tag, lado, bid_usar, compra, maxbid, limit, hoy, fprog, ahora, ia_vender)
             if cerrar:
                 if nota == 'puerta 3: IA':
                     nota = 'puerta 3: IA (' + razon + ')'
@@ -856,7 +898,8 @@ def main():
                 'Precio Compra': ask, 'Total Inv.': round(costo + COMISION, 2), 'Precio Limit': lim,
                 'Fecha Venta Prog': fprog.strftime('%Y-%m-%d'), 'Fecha Venta': '', 'Precio Venta': '',
                 'Total Venta': '', 'Ganancia $': '', 'Ganancia %': '', 'Bid Actual': bid0, 'Max Bid': bid0,
-                'Estrategia': r['Estrategia Cardona'], 'Estado': 'ABIERTA', 'Notas': nota,
+                'Estrategia': r['Estrategia Cardona'], 'Estado': 'ABIERTA',
+                'Notas': nota + ' | entrada valida (horario Cardona)',
                 'VI': '', 'DTE': dte, 'Break Even': be, 'Max Loss': round(costo + COMISION, 2)
             })
         contratos += qty
@@ -867,7 +910,7 @@ def main():
 
     sh = guardar_radar(resultados)
     if sh is not None:
-        escribir_simulador(abrir_simulador(sh), filas)
+        escribir_simulador_seguro(abrir_simulador(sh), filas)
 
     print("=" * 60)
     for r in resultados:
