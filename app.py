@@ -956,7 +956,7 @@ if not fila.empty:
     with t2:
         st.markdown("**Opcion PUT (strike abajo)**")
         st.write("Strike OTM: " + str(r['Strike Put OTM']))
-        st.write("Ask ($): " + str(r['Put Ask ($)]))
+        st.write("Ask ($): " + str(r['Put Ask ($)']))
         if r['Put Estado'] == 'VIABLE':
             st.success(CHECK + " PUT habilitado por el metodo")
         else:
